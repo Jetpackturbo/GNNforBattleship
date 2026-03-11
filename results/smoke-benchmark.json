@@ -1,0 +1,32 @@
+{
+  "Random": [
+    94,
+    97,
+    89
+  ],
+  "Hunt Target": [
+    59,
+    68,
+    69
+  ],
+  "Probability Density": [
+    60,
+    48,
+    57
+  ],
+  "Ising BP": [
+    43,
+    78,
+    67
+  ],
+  "GNN Policy": [
+    99,
+    90,
+    100
+  ],
+  "ATTN smoke-attn": [
+    99,
+    85,
+    97
+  ]
+}

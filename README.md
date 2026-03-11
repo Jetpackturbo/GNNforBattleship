@@ -239,6 +239,42 @@ strategies over large simulation runs.  This repo mirrors the same family of
 baselines, but adapts them to the simpler environment used here, which exposes
 only **hit/miss** feedback and does **not** announce when a ship has been sunk.
 
+### Training and testing scripts
+
+Train a plain message-passing policy model:
+
+```bash
+python train_model.py \
+  --model gnn \
+  --output checkpoints/gnn-policy.pt \
+  --epochs 20 \
+  --n-train 4000 \
+  --n-val 800
+```
+
+Train the attention-based policy model:
+
+```bash
+python train_model.py \
+  --model attn \
+  --output checkpoints/attn-policy.pt \
+  --epochs 20 \
+  --n-train 4000 \
+  --n-val 800 \
+  --num-layers 4 \
+  --num-heads 4
+```
+
+Benchmark one or more saved checkpoints against the built-in baselines:
+
+```bash
+python test_model.py \
+  --checkpoint checkpoints/gnn-policy.pt \
+  --checkpoint checkpoints/attn-policy.pt \
+  --n-games 200 \
+  --save-json results/benchmark.json
+```
+
 ---
 
 ## 7. Design Notes and Limitations
