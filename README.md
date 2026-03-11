@@ -265,6 +265,36 @@ python train_model.py \
   --num-heads 4
 ```
 
+Enable `tqdm` progress bars by default, or disable them with:
+
+```bash
+python train_model.py --model gnn --output checkpoints/gnn-policy.pt --no-tqdm
+```
+
+Enable Weights & Biases logging:
+
+```bash
+export WANDB_API_KEY=your_key_here
+python train_model.py \
+  --model gnn \
+  --output checkpoints/gnn-policy.pt \
+  --use-wandb \
+  --wandb-project GNNforBattleship \
+  --wandb-run-name gnn-policy-run
+```
+
+Or pass the API key directly:
+
+```bash
+python train_model.py \
+  --model attn \
+  --output checkpoints/attn-policy.pt \
+  --use-wandb \
+  --wandb-api-key your_key_here \
+  --wandb-project GNNforBattleship \
+  --wandb-run-name attn-policy-run
+```
+
 Benchmark one or more saved checkpoints against the built-in baselines:
 
 ```bash
@@ -273,6 +303,18 @@ python test_model.py \
   --checkpoint checkpoints/attn-policy.pt \
   --n-games 200 \
   --save-json results/benchmark.json
+```
+
+You can also log benchmark metrics to `wandb`:
+
+```bash
+python test_model.py \
+  --checkpoint checkpoints/gnn-policy.pt \
+  --checkpoint checkpoints/attn-policy.pt \
+  --n-games 200 \
+  --use-wandb \
+  --wandb-project GNNforBattleship \
+  --wandb-run-name benchmark-run
 ```
 
 ---

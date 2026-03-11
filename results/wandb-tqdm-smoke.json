@@ -1,0 +1,22 @@
+{
+  "Random": [
+    94,
+    97
+  ],
+  "Hunt Target": [
+    59,
+    68
+  ],
+  "Probability Density": [
+    60,
+    48
+  ],
+  "Ising BP": [
+    43,
+    78
+  ],
+  "GNN Policy": [
+    92,
+    100
+  ]
+}

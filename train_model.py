@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 from pathlib import Path
 
 import torch
@@ -24,6 +25,33 @@ def _load_attention_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _init_wandb_run(args: argparse.Namespace, config: dict):
+    if not args.use_wandb:
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb logging was requested but the package is not installed. "
+            "Install it with `pip install wandb` or `pip install -r requirements.txt`."
+        ) from exc
+
+    if args.wandb_api_key:
+        os.environ["WANDB_API_KEY"] = args.wandb_api_key
+        wandb.login(key=args.wandb_api_key, relogin=True)
+    else:
+        wandb.login()
+
+    return wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.wandb_run_name,
+        mode=args.wandb_mode,
+        config=config,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +79,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use torch-geometric for the plain GNN model.",
     )
+    parser.add_argument(
+        "--no-tqdm",
+        action="store_true",
+        help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging.",
+    )
+    parser.add_argument("--wandb-project", default="GNNforBattleship")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-run-name")
+    parser.add_argument("--wandb-api-key")
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+    )
     return parser.parse_args()
 
 
@@ -72,37 +119,61 @@ def main() -> None:
         "device": args.device,
     }
 
-    if args.model == "gnn":
-        model_kwargs = {
-            "hidden_dim": args.hidden_dim,
-            "num_layers": args.num_layers,
-            "use_pyg": args.use_pyg,
-        }
-        model, history = train_gnn(use_pyg=args.use_pyg, **common_train_kwargs)
-    else:
-        attn_module = _load_attention_module()
-        model_kwargs = {
-            "hidden_dim": args.hidden_dim,
-            "num_layers": args.num_layers,
-            "num_heads": args.num_heads,
-        }
-        model, history = attn_module.train_attention_gnn(
-            num_heads=args.num_heads,
-            **common_train_kwargs,
-        )
-
-    checkpoint = {
-        "model_type": args.model,
-        "model_kwargs": model_kwargs,
-        "train_kwargs": common_train_kwargs,
-        "history": history,
-        "state_dict": model.state_dict(),
+    config = {
+        "model": args.model,
+        "output": str(output_path),
+        **common_train_kwargs,
+        "num_heads": args.num_heads,
+        "use_pyg": args.use_pyg,
     }
-    torch.save(checkpoint, output_path)
+    wandb_run = _init_wandb_run(args, config)
 
-    print(f"Saved {args.model} checkpoint to {output_path}")
-    if "val_top1" in history and history["val_top1"]:
-        print(f"Final val_top1: {history['val_top1'][-1]:.3f}")
+    try:
+        if args.model == "gnn":
+            model_kwargs = {
+                "hidden_dim": args.hidden_dim,
+                "num_layers": args.num_layers,
+                "use_pyg": args.use_pyg,
+            }
+            model, history = train_gnn(
+                use_pyg=args.use_pyg,
+                show_progress=not args.no_tqdm,
+                wandb_run=wandb_run,
+                **common_train_kwargs,
+            )
+        else:
+            attn_module = _load_attention_module()
+            model_kwargs = {
+                "hidden_dim": args.hidden_dim,
+                "num_layers": args.num_layers,
+                "num_heads": args.num_heads,
+            }
+            model, history = attn_module.train_attention_gnn(
+                num_heads=args.num_heads,
+                show_progress=not args.no_tqdm,
+                wandb_run=wandb_run,
+                **common_train_kwargs,
+            )
+
+        checkpoint = {
+            "model_type": args.model,
+            "model_kwargs": model_kwargs,
+            "train_kwargs": common_train_kwargs,
+            "history": history,
+            "state_dict": model.state_dict(),
+        }
+        torch.save(checkpoint, output_path)
+
+        print(f"Saved {args.model} checkpoint to {output_path}")
+        if "val_top1" in history and history["val_top1"]:
+            print(f"Final val_top1: {history['val_top1'][-1]:.3f}")
+            if wandb_run is not None:
+                wandb_run.summary["final_val_top1"] = history["val_top1"][-1]
+        if wandb_run is not None:
+            wandb_run.summary["checkpoint_path"] = str(output_path)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":

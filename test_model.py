@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,33 @@ def _load_attention_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _init_wandb_run(args: argparse.Namespace, config: dict):
+    if not args.use_wandb:
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb logging was requested but the package is not installed. "
+            "Install it with `pip install wandb` or `pip install -r requirements.txt`."
+        ) from exc
+
+    if args.wandb_api_key:
+        os.environ["WANDB_API_KEY"] = args.wandb_api_key
+        wandb.login(key=args.wandb_api_key, relogin=True)
+    else:
+        wandb.login()
+
+    return wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.wandb_run_name,
+        mode=args.wandb_mode,
+        config=config,
+    )
 
 
 def _load_checkpoint(path: Path, device: str) -> tuple[str, object]:
@@ -61,49 +89,84 @@ def parse_args() -> argparse.Namespace:
         "--save-json",
         help="Optional path to save benchmark results as JSON.",
     )
+    parser.add_argument(
+        "--no-tqdm",
+        action="store_true",
+        help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging.",
+    )
+    parser.add_argument("--wandb-project", default="GNNforBattleship")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-run-name")
+    parser.add_argument("--wandb-api-key")
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    gnn_model = None
-    extra_agents: dict[str, object] = {}
+    config = {
+        "n_games": args.n_games,
+        "seed": args.seed,
+        "device": args.device,
+        "checkpoints": list(args.checkpoint),
+    }
+    wandb_run = _init_wandb_run(args, config)
 
-    for ckpt_str in args.checkpoint:
-        ckpt_path = Path(ckpt_str).expanduser().resolve()
-        model_type, model = _load_checkpoint(ckpt_path, args.device)
-        label = ckpt_path.stem
+    try:
+        gnn_model = None
+        extra_agents: dict[str, object] = {}
 
-        if model_type == "gnn":
-            if gnn_model is None:
-                gnn_model = model
+        for ckpt_str in args.checkpoint:
+            ckpt_path = Path(ckpt_str).expanduser().resolve()
+            model_type, model = _load_checkpoint(ckpt_path, args.device)
+            label = ckpt_path.stem
+
+            if model_type == "gnn":
+                if gnn_model is None:
+                    gnn_model = model
+                else:
+                    from gnn import GNNAgent
+
+                    extra_agents[f"GNN {label}"] = GNNAgent(model, device=args.device)
             else:
-                from gnn import GNNAgent
+                attn_module = _load_attention_module()
+                extra_agents[f"ATTN {label}"] = attn_module.AttentionGNNAgent(
+                    model, device=args.device
+                )
 
-                extra_agents[f"GNN {label}"] = GNNAgent(model, device=args.device)
-        else:
-            attn_module = _load_attention_module()
-            extra_agents[f"ATTN {label}"] = attn_module.AttentionGNNAgent(
-                model, device=args.device
-            )
+        print(benchmark_reference())
+        results = compare_all_agents(
+            n_games=args.n_games,
+            gnn_model=gnn_model,
+            seed=args.seed,
+            device=args.device,
+            verbose=True,
+            extra_agents=extra_agents if extra_agents else None,
+            show_progress=not args.no_tqdm,
+            wandb_run=wandb_run,
+        )
 
-    print(benchmark_reference())
-    results = compare_all_agents(
-        n_games=args.n_games,
-        gnn_model=gnn_model,
-        seed=args.seed,
-        device=args.device,
-        verbose=True,
-        extra_agents=extra_agents if extra_agents else None,
-    )
-
-    if args.save_json:
-        save_path = Path(args.save_json).expanduser().resolve()
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        with save_path.open("w", encoding="utf-8") as fh:
-            json.dump(results, fh, indent=2)
-        print(f"Saved benchmark results to {save_path}")
+        if args.save_json:
+            save_path = Path(args.save_json).expanduser().resolve()
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with save_path.open("w", encoding="utf-8") as fh:
+                json.dump(results, fh, indent=2)
+            print(f"Saved benchmark results to {save_path}")
+            if wandb_run is not None:
+                wandb_run.summary["results_json"] = str(save_path)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":

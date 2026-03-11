@@ -24,7 +24,7 @@ does not announce when a ship has been sunk.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -41,12 +41,30 @@ except ImportError:
     HAS_PYG = False
     MessagePassing = None  # type: ignore
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 
 GRID_SIZE = 10
 N_CELLS = GRID_SIZE * GRID_SIZE
 NODE_FEATURES = 5
 EDGE_FEATURES = 1
 SHIP_LENGTHS = [5, 4, 3, 3, 2]
+
+
+def _maybe_tqdm(iterable, enabled: bool, **kwargs):
+    """Wrap an iterable in tqdm when available and requested."""
+    if enabled and tqdm is not None:
+        return tqdm(iterable, **kwargs)
+    return iterable
+
+
+def _wandb_log(run: Any, payload: dict[str, float], step: Optional[int] = None) -> None:
+    """Log metrics to wandb when a run is active."""
+    if run is not None:
+        run.log(payload, step=step)
 
 
 def build_grid_edges(grid_size: int = GRID_SIZE):
@@ -538,13 +556,21 @@ def generate_dataset(
     n_samples: int = 6000,
     max_context_shots: int = 40,
     seed: int = 0,
+    show_progress: bool = True,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Generate `(features, target_policy, unknown_mask)` samples."""
     rng = np.random.default_rng(seed)
     data = []
-    for i in range(n_samples):
+    iterator = _maybe_tqdm(
+        range(n_samples),
+        show_progress,
+        total=n_samples,
+        desc="Generating policy states",
+        leave=False,
+    )
+    for i in iterator:
         data.append(_generate_policy_sample(rng, max_context_shots=max_context_shots))
-        if (i + 1) % 1000 == 0:
+        if not show_progress and (i + 1) % 1000 == 0:
             print(f"  Generated {i + 1}/{n_samples} policy states ...")
     return data
 
@@ -561,11 +587,23 @@ def train_gnn(
     seed: int = 0,
     device: str = "cpu",
     use_pyg: bool = False,
+    show_progress: bool = True,
+    wandb_run: Any = None,
 ) -> tuple["BattleshipGNN", dict]:
     """Train the move-selection GNN by imitating the probability-density teacher."""
     print("Generating policy-training data ...")
-    train_data = generate_dataset(n_train, max_context_shots=max_context_shots, seed=seed)
-    val_data = generate_dataset(n_val, max_context_shots=max_context_shots, seed=seed + 1)
+    train_data = generate_dataset(
+        n_train,
+        max_context_shots=max_context_shots,
+        seed=seed,
+        show_progress=show_progress,
+    )
+    val_data = generate_dataset(
+        n_val,
+        max_context_shots=max_context_shots,
+        seed=seed + 1,
+        show_progress=show_progress,
+    )
 
     model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -582,7 +620,14 @@ def train_gnn(
         total_acc = 0.0
         total_batches = 0
 
-        for start in range(0, len(dataset), batch_size):
+        iterator = _maybe_tqdm(
+            range(0, len(dataset), batch_size),
+            show_progress,
+            total=(len(dataset) + batch_size - 1) // batch_size,
+            desc="Train batches" if train else "Val batches",
+            leave=False,
+        )
+        for start in iterator:
             batch_idx = indices[start : start + batch_size]
             if train:
                 optimizer.zero_grad()
@@ -638,15 +683,35 @@ def train_gnn(
     print(
         f"Training policy GNN ({n_train} train / {n_val} val / {n_epochs} epochs) ..."
     )
-    for epoch in range(1, n_epochs + 1):
+    epoch_iterator = _maybe_tqdm(
+        range(1, n_epochs + 1),
+        show_progress,
+        total=n_epochs,
+        desc="Epochs",
+    )
+    for epoch in epoch_iterator:
         train_loss, train_top1 = _run_epoch(train_data, train=True)
         val_loss, val_top1 = _run_epoch(val_data, train=False)
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_top1"].append(train_top1)
         history["val_top1"].append(val_top1)
+        _wandb_log(
+            wandb_run,
+            {
+                "epoch": float(epoch),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_top1": train_top1,
+                "val_top1": val_top1,
+            },
+            step=epoch,
+        )
 
-        if epoch % 5 == 0 or epoch == 1:
+        if hasattr(epoch_iterator, "set_postfix"):
+            epoch_iterator.set_postfix(val_loss=f"{val_loss:.4f}", val_top1=f"{val_top1:.3f}")
+
+        if (not show_progress) and (epoch % 5 == 0 or epoch == 1):
             print(
                 f"  Epoch {epoch:3d}/{n_epochs}  "
                 f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
@@ -706,6 +771,8 @@ def compare_all_agents(
     device: str = "cpu",
     verbose: bool = True,
     extra_agents: Optional[dict[str, object]] = None,
+    show_progress: bool = True,
+    wandb_run: Any = None,
 ) -> dict[str, list[int]]:
     """Run the DataGenetics-style benchmark suite on shared game instances."""
     agents: dict[str, object] = {
@@ -721,14 +788,20 @@ def compare_all_agents(
 
     results: dict[str, list[int]] = {name: [] for name in agents}
 
-    for game_idx in range(n_games):
+    game_iterator = _maybe_tqdm(
+        range(n_games),
+        show_progress,
+        total=n_games,
+        desc="Benchmark games",
+    )
+    for game_idx in game_iterator:
         game_seed = seed + game_idx
         game = BattleshipGame(grid_size=GRID_SIZE, seed=game_seed)
         for name, agent in agents.items():
             result = play_game(agent, game=game, seed=game_seed)
             results[name].append(int(result["n_shots"]))
 
-        if verbose and (game_idx + 1) % 50 == 0:
+        if verbose and (not show_progress) and (game_idx + 1) % 50 == 0:
             print(f"  Completed {game_idx + 1}/{n_games} games ...")
 
     if verbose:
@@ -740,6 +813,14 @@ def compare_all_agents(
         for name, shots in results.items():
             arr = np.array(shots, dtype=np.float64)
             print(f"  {name:<20} {arr.mean():6.1f} {np.median(arr):7.1f} {arr.std():6.1f}")
+            _wandb_log(
+                wandb_run,
+                {
+                    f"benchmark/{name}/mean_shots": float(arr.mean()),
+                    f"benchmark/{name}/median_shots": float(np.median(arr)),
+                    f"benchmark/{name}/std_shots": float(arr.std()),
+                },
+            )
         print()
 
     return results

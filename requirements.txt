@@ -1,0 +1,14 @@
+# Core numerical and plotting dependencies
+numpy
+matplotlib
+
+# Deep learning
+torch
+
+# Experiment tracking and progress bars
+wandb
+tqdm
+
+# Optional: enables the PyG-backed message-passing path in gnn.py
+# The repository works without this package by using the pure PyTorch fallback.
+torch-geometric

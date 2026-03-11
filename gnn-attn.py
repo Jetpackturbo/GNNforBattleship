@@ -11,7 +11,7 @@ and the same benchmark harness so the models are directly comparable.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -24,6 +24,8 @@ from gnn import (
     GNNAgent,
     IsingBPAgent,
     ProbabilityDensityAgent,
+    _maybe_tqdm,
+    _wandb_log,
     benchmark_reference,
     compare_all_agents,
     generate_dataset,
@@ -235,11 +237,23 @@ def train_attention_gnn(
     max_context_shots: int = 40,
     seed: int = 0,
     device: str = "cpu",
+    show_progress: bool = True,
+    wandb_run: Any = None,
 ) -> tuple["BattleshipAttentionGNN", dict]:
     """Train the attention-based policy network against the same teacher."""
     print("Generating policy-training data for attention GNN ...")
-    train_data = generate_dataset(n_train, max_context_shots=max_context_shots, seed=seed)
-    val_data = generate_dataset(n_val, max_context_shots=max_context_shots, seed=seed + 1)
+    train_data = generate_dataset(
+        n_train,
+        max_context_shots=max_context_shots,
+        seed=seed,
+        show_progress=show_progress,
+    )
+    val_data = generate_dataset(
+        n_val,
+        max_context_shots=max_context_shots,
+        seed=seed + 1,
+        show_progress=show_progress,
+    )
 
     model = BattleshipAttentionGNN(
         hidden_dim=hidden_dim,
@@ -260,7 +274,14 @@ def train_attention_gnn(
         total_acc = 0.0
         total_batches = 0
 
-        for start in range(0, len(dataset), batch_size):
+        iterator = _maybe_tqdm(
+            range(0, len(dataset), batch_size),
+            show_progress,
+            total=(len(dataset) + batch_size - 1) // batch_size,
+            desc="Train batches" if train else "Val batches",
+            leave=False,
+        )
+        for start in iterator:
             batch_idx = indices[start : start + batch_size]
             feats, targets, masks = [], [], []
             for i in batch_idx:
@@ -297,7 +318,13 @@ def train_attention_gnn(
     print(
         f"Training attention GNN ({n_train} train / {n_val} val / {n_epochs} epochs) ..."
     )
-    for epoch in range(1, n_epochs + 1):
+    epoch_iterator = _maybe_tqdm(
+        range(1, n_epochs + 1),
+        show_progress,
+        total=n_epochs,
+        desc="Epochs",
+    )
+    for epoch in epoch_iterator:
         train_loss, train_top1 = _run_epoch(train_data, train=True)
         val_loss, val_top1 = _run_epoch(val_data, train=False)
 
@@ -305,8 +332,22 @@ def train_attention_gnn(
         history["val_loss"].append(val_loss)
         history["train_top1"].append(train_top1)
         history["val_top1"].append(val_top1)
+        _wandb_log(
+            wandb_run,
+            {
+                "epoch": float(epoch),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_top1": train_top1,
+                "val_top1": val_top1,
+            },
+            step=epoch,
+        )
 
-        if epoch % 5 == 0 or epoch == 1:
+        if hasattr(epoch_iterator, "set_postfix"):
+            epoch_iterator.set_postfix(val_loss=f"{val_loss:.4f}", val_top1=f"{val_top1:.3f}")
+
+        if (not show_progress) and (epoch % 5 == 0 or epoch == 1):
             print(
                 f"  Epoch {epoch:3d}/{n_epochs}  "
                 f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
@@ -322,6 +363,8 @@ def compare_with_attention(
     seed: int = 100,
     device: str = "cpu",
     gnn_model: Optional[object] = None,
+    show_progress: bool = True,
+    wandb_run: Any = None,
 ) -> dict[str, list[int]]:
     """Run the shared benchmark with the attention model included."""
     extra_agents = {"GNN Attention": AttentionGNNAgent(attn_model, device=device)}
@@ -332,6 +375,8 @@ def compare_with_attention(
         device=device,
         verbose=True,
         extra_agents=extra_agents,
+        show_progress=show_progress,
+        wandb_run=wandb_run,
     )
 
 
