@@ -207,7 +207,41 @@ python battleship_demo.py
 
 ---
 
-## 6. Design Notes and Limitations
+## 6. Learned Move Policies
+
+The repository now includes two learned Battleship move-selection models:
+
+- `gnn.py`: message-passing GNN policy trained to imitate a strong
+  probability-density Battleship heuristic.
+- `gnn-attn.py`: attention-based graph policy trained on the same target.
+
+These models **do not** predict hidden ship occupancy directly.  Instead, they
+learn a **next-move distribution** over unrevealed cells, which better matches
+the gameplay objective of choosing the next shot.
+
+### Training target
+
+The supervision target is a **DataGenetics-style probability-density policy**:
+for each partial board, enumerate valid horizontal and vertical placements of
+ships with lengths 5, 4, 3, 3, and 2, discard placements inconsistent with
+known misses, and upweight placements that pass through known hits.  The next
+move is the unrevealed cell with the highest aggregate placement count.
+
+### Benchmark source
+
+The benchmark suite in `gnn.py` is derived from Nick Berry's online Battleship
+analysis:
+
+- [DataGenetics: Battleship](https://www.datagenetics.com/blog/december32011/)
+
+That article compares `Random`, `Hunt/Target`, and `Probability Density`
+strategies over large simulation runs.  This repo mirrors the same family of
+baselines, but adapts them to the simpler environment used here, which exposes
+only **hit/miss** feedback and does **not** announce when a ship has been sunk.
+
+---
+
+## 7. Design Notes and Limitations
 
 **Why not encode exact ship-length constraints?**  The Ising model captures *local* pair correlations but not the global constraint that each ship has a specific fixed length.  Exact inference with length constraints would require a factor graph with chain factors along each row and column — significantly more complex.  The Ising model is a tractable, physically motivated approximation that still leverages the key spatial structure.
 
