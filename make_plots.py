@@ -150,7 +150,13 @@ def _build_trajectory_agent(
     if agent_name == "ising_bp":
         return IsingBPAgent()
     if agent_name == "mcts":
-        return MCTSAgent(n_simulations=mcts_simulations, rollout_depth=mcts_rollout_depth)
+        return MCTSAgent(
+            n_simulations=mcts_simulations,
+            rollout_depth=mcts_rollout_depth,
+            tree_policy="puct",
+            prior_source="blend",
+            leaf_evaluator="heuristic",
+        )
     if agent_name in {"gnn", "attn"}:
         if checkpoint is None:
             raise ValueError(f"--checkpoint is required for trajectory agent '{agent_name}'.")
@@ -282,6 +288,9 @@ def _build_agent_factories(
         factories["MCTS"] = lambda: MCTSAgent(
             n_simulations=mcts_simulations,
             rollout_depth=mcts_rollout_depth,
+            tree_policy="puct",
+            prior_source="blend",
+            leaf_evaluator="heuristic",
         )
     if gnn_checkpoint is not None:
         _, gnn_model = _load_checkpoint(gnn_checkpoint, device)

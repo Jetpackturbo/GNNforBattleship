@@ -244,6 +244,7 @@ def train_attention_gnn(
     surprise_augmentation: bool = False,
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
+    dataset_cache_dir: Optional[str] = None,
 ) -> tuple["BattleshipAttentionGNN", dict]:
     """Train the attention-based policy network against the same teacher."""
     print("Generating policy-training data for attention GNN ...")
@@ -257,6 +258,7 @@ def train_attention_gnn(
         surprise_augmentation=surprise_augmentation,
         surprise_samples=surprise_samples,
         surprise_alpha=surprise_alpha,
+        cache_dir=dataset_cache_dir,
     )
     val_data = generate_dataset(
         n_val,
@@ -268,6 +270,7 @@ def train_attention_gnn(
         surprise_augmentation=surprise_augmentation,
         surprise_samples=surprise_samples,
         surprise_alpha=surprise_alpha,
+        cache_dir=dataset_cache_dir,
     )
 
     model = BattleshipAttentionGNN(

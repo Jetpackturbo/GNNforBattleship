@@ -116,6 +116,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mcts-rollout-depth", type=int, default=18)
     parser.add_argument("--mcts-exploration", type=float, default=1.4)
     parser.add_argument(
+        "--mcts-tree-policy",
+        choices=["uct", "puct", "uct_hybrid"],
+        default="puct",
+    )
+    parser.add_argument(
+        "--mcts-prior-source",
+        choices=["heuristic", "neural", "blend"],
+        default="blend",
+    )
+    parser.add_argument(
+        "--mcts-leaf-evaluator",
+        choices=["heuristic", "rollout", "hybrid"],
+        default="heuristic",
+    )
+    parser.add_argument("--mcts-leaf-samples", type=int, default=16)
+    parser.add_argument(
         "--save-json",
         help="Optional path to save benchmark results as JSON.",
     )
@@ -190,6 +206,10 @@ def main() -> None:
                 "n_simulations": args.mcts_simulations,
                 "rollout_depth": args.mcts_rollout_depth,
                 "exploration": args.mcts_exploration,
+                "tree_policy": args.mcts_tree_policy,
+                "prior_source": args.mcts_prior_source,
+                "leaf_evaluator": args.mcts_leaf_evaluator,
+                "leaf_samples": args.mcts_leaf_samples,
             },
         )
 

@@ -24,6 +24,9 @@ does not announce when a ship has been sunk.
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
+import json
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -66,6 +69,84 @@ def _wandb_log(run: Any, payload: dict[str, float], step: Optional[int] = None) 
     """Log metrics to wandb when a run is active."""
     if run is not None:
         run.log(payload, step=step)
+
+
+def _json_ready(value: Any) -> Any:
+    """Convert nested config values into a stable JSON-serializable structure."""
+    if isinstance(value, dict):
+        return {
+            str(k): _json_ready(v)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _dataset_cache_path(
+    cache_dir: Path,
+    *,
+    n_samples: int,
+    max_context_shots: int,
+    seed: int,
+    teacher_policy: str,
+    teacher_kwargs: Optional[dict[str, Any]],
+    surprise_augmentation: bool,
+    surprise_samples: int,
+    surprise_alpha: float,
+) -> tuple[Path, dict[str, Any]]:
+    """Build a deterministic cache path for a generated dataset."""
+    metadata = {
+        "n_samples": int(n_samples),
+        "max_context_shots": int(max_context_shots),
+        "seed": int(seed),
+        "teacher_policy": str(teacher_policy),
+        "teacher_kwargs": _json_ready({} if teacher_kwargs is None else teacher_kwargs),
+        "surprise_augmentation": bool(surprise_augmentation),
+        "surprise_samples": int(surprise_samples),
+        "surprise_alpha": float(surprise_alpha),
+        "grid_size": GRID_SIZE,
+        "ship_lengths": list(SHIP_LENGTHS),
+        "node_features": NODE_FEATURES,
+    }
+    digest = hashlib.sha256(
+        json.dumps(metadata, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return cache_dir / f"policy_dataset_{digest}.npz", metadata
+
+
+def _load_cached_dataset(cache_path: Path) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Load a cached dataset saved by `generate_dataset`."""
+    with np.load(cache_path, allow_pickle=False) as payload:
+        features = payload["features"]
+        policies = payload["policies"]
+        masks = payload["masks"].astype(bool, copy=False)
+    return [(features[i], policies[i], masks[i]) for i in range(features.shape[0])]
+
+
+def _save_cached_dataset(
+    cache_path: Path,
+    metadata: dict[str, Any],
+    data: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> None:
+    """Persist a generated dataset to a compressed cache file."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    features = np.stack([item[0] for item in data]).astype(np.float32, copy=False)
+    policies = np.stack([item[1] for item in data]).astype(np.float32, copy=False)
+    masks = np.stack([item[2] for item in data]).astype(bool, copy=False)
+    np.savez_compressed(
+        cache_path,
+        features=features,
+        policies=policies,
+        masks=masks,
+        metadata=np.array(json.dumps(metadata, sort_keys=True)),
+    )
 
 
 def build_grid_edges(grid_size: int = GRID_SIZE):
@@ -630,8 +711,28 @@ def generate_dataset(
     surprise_augmentation: bool = False,
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
+    cache_dir: Optional[str | Path] = None,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Generate `(features, target_policy, unknown_mask)` samples."""
+    cache_path: Optional[Path] = None
+    metadata: Optional[dict[str, Any]] = None
+    if cache_dir is not None:
+        cache_root = Path(cache_dir).expanduser().resolve()
+        cache_path, metadata = _dataset_cache_path(
+            cache_root,
+            n_samples=n_samples,
+            max_context_shots=max_context_shots,
+            seed=seed,
+            teacher_policy=teacher_policy,
+            teacher_kwargs=teacher_kwargs,
+            surprise_augmentation=surprise_augmentation,
+            surprise_samples=surprise_samples,
+            surprise_alpha=surprise_alpha,
+        )
+        if cache_path.exists():
+            print(f"Loading cached dataset from {cache_path}")
+            return _load_cached_dataset(cache_path)
+
     rng = np.random.default_rng(seed)
     data = []
     iterator = _maybe_tqdm(
@@ -655,6 +756,9 @@ def generate_dataset(
         )
         if not show_progress and (i + 1) % 1000 == 0:
             print(f"  Generated {i + 1}/{n_samples} policy states ...")
+    if cache_path is not None and metadata is not None:
+        print(f"Saving dataset cache to {cache_path}")
+        _save_cached_dataset(cache_path, metadata, data)
     return data
 
 
@@ -677,6 +781,7 @@ def train_gnn(
     surprise_augmentation: bool = False,
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
+    dataset_cache_dir: Optional[str | Path] = None,
 ) -> tuple["BattleshipGNN", dict]:
     """Train the move-selection GNN by imitating the chosen teacher policy."""
     print("Generating policy-training data ...")
@@ -690,6 +795,7 @@ def train_gnn(
         surprise_augmentation=surprise_augmentation,
         surprise_samples=surprise_samples,
         surprise_alpha=surprise_alpha,
+        cache_dir=dataset_cache_dir,
     )
     val_data = generate_dataset(
         n_val,
@@ -701,6 +807,7 @@ def train_gnn(
         surprise_augmentation=surprise_augmentation,
         surprise_samples=surprise_samples,
         surprise_alpha=surprise_alpha,
+        cache_dir=dataset_cache_dir,
     )
 
     model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)

@@ -114,6 +114,30 @@ def parse_args() -> argparse.Namespace:
         help="UCT exploration constant for the MCTS teacher.",
     )
     parser.add_argument(
+        "--teacher-mcts-tree-policy",
+        choices=["uct", "puct", "uct_hybrid"],
+        default="puct",
+        help="Tree policy used by the MCTS teacher.",
+    )
+    parser.add_argument(
+        "--teacher-mcts-prior-source",
+        choices=["heuristic", "neural", "blend"],
+        default="blend",
+        help="Action-prior source used by the MCTS teacher.",
+    )
+    parser.add_argument(
+        "--teacher-mcts-leaf-evaluator",
+        choices=["heuristic", "rollout", "hybrid"],
+        default="heuristic",
+        help="How the MCTS teacher evaluates newly expanded leaves.",
+    )
+    parser.add_argument(
+        "--teacher-mcts-leaf-samples",
+        type=int,
+        default=16,
+        help="Posterior samples used by heuristic MCTS leaf evaluation.",
+    )
+    parser.add_argument(
         "--surprise-augmentation",
         action="store_true",
         help="Bias sampled training states toward high Bayesian surprise observations.",
@@ -145,6 +169,16 @@ def parse_args() -> argparse.Namespace:
         "--no-tqdm",
         action="store_true",
         help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--dataset-cache-dir",
+        default=str(ROOT / "dataset_cache"),
+        help="Directory used to cache generated training/validation datasets.",
+    )
+    parser.add_argument(
+        "--no-dataset-cache",
+        action="store_true",
+        help="Disable on-disk dataset caching for generated teacher data.",
     )
     parser.add_argument(
         "--use-wandb",
@@ -186,6 +220,10 @@ def main() -> None:
             "n_simulations": args.teacher_mcts_simulations,
             "rollout_depth": args.teacher_mcts_rollout_depth,
             "exploration": args.teacher_mcts_exploration,
+            "tree_policy": args.teacher_mcts_tree_policy,
+            "prior_source": args.teacher_mcts_prior_source,
+            "leaf_evaluator": args.teacher_mcts_leaf_evaluator,
+            "leaf_samples": args.teacher_mcts_leaf_samples,
         }
 
     config = {
@@ -214,6 +252,7 @@ def main() -> None:
         "surprise_augmentation": args.surprise_augmentation,
         "surprise_samples": args.surprise_samples,
         "surprise_alpha": args.surprise_alpha,
+        "dataset_cache_dir": None if args.no_dataset_cache else args.dataset_cache_dir,
     }
     wandb_run = _init_wandb_run(args, config)
 
@@ -233,6 +272,7 @@ def main() -> None:
                 surprise_augmentation=args.surprise_augmentation,
                 surprise_samples=args.surprise_samples,
                 surprise_alpha=args.surprise_alpha,
+                dataset_cache_dir=None if args.no_dataset_cache else args.dataset_cache_dir,
                 **common_train_kwargs,
             )
         else:
@@ -251,6 +291,7 @@ def main() -> None:
                 surprise_augmentation=args.surprise_augmentation,
                 surprise_samples=args.surprise_samples,
                 surprise_alpha=args.surprise_alpha,
+                dataset_cache_dir=None if args.no_dataset_cache else args.dataset_cache_dir,
                 **common_train_kwargs,
             )
 
@@ -263,6 +304,7 @@ def main() -> None:
             "surprise_augmentation": args.surprise_augmentation,
             "surprise_samples": args.surprise_samples,
             "surprise_alpha": args.surprise_alpha,
+            "dataset_cache_dir": None if args.no_dataset_cache else args.dataset_cache_dir,
             "history": history,
             "state_dict": model.state_dict(),
         }

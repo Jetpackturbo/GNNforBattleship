@@ -12,7 +12,7 @@ hit/miss outcomes during each simulation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -30,6 +30,21 @@ def _sample_argmax(score: np.ndarray, rng: np.random.Generator) -> tuple[int, in
     choices = np.argwhere(score == max_score)
     row, col = choices[int(rng.integers(len(choices)))]
     return int(row), int(col)
+
+
+def _normalize_action_probs(score: np.ndarray, revealed: np.ndarray) -> np.ndarray:
+    """Normalize nonnegative action scores over unrevealed cells."""
+    probs = np.zeros_like(score, dtype=np.float64)
+    unknown = ~revealed
+    if not np.any(unknown):
+        return probs
+    masked = np.clip(score[unknown].astype(np.float64), 0.0, None)
+    total = float(masked.sum())
+    if total <= 0.0:
+        probs[unknown] = 1.0 / float(masked.size)
+    else:
+        probs[unknown] = masked / total
+    return probs
 
 
 def _build_placements(grid_size: int) -> dict[int, list[tuple[tuple[int, int], ...]]]:
@@ -327,18 +342,31 @@ def _terminal(
 
 @dataclass
 class _ActionStats:
+    prior: float = 0.0
     visits: int = 0
     total_value: float = 0.0
     children: dict[bool, "_SearchNode"] = field(default_factory=dict)
 
 
 class _SearchNode:
-    def __init__(self, revealed: np.ndarray, hit_mask: np.ndarray) -> None:
+    def __init__(
+        self,
+        revealed: np.ndarray,
+        hit_mask: np.ndarray,
+        action_priors: np.ndarray,
+    ) -> None:
         self.revealed = revealed
         self.hit_mask = hit_mask
         self.visits = 0
         self.action_stats: dict[tuple[int, int], _ActionStats] = {}
-        self.unexpanded_actions = [tuple(pos) for pos in np.argwhere(~revealed)]
+        unknown = np.argwhere(~revealed)
+        uniform_prior = 1.0 / max(len(unknown), 1)
+        for row, col in unknown:
+            row_i, col_i = int(row), int(col)
+            prior = float(action_priors[row_i, col_i]) if action_priors.size else uniform_prior
+            if prior <= 0.0:
+                prior = uniform_prior
+            self.action_stats[(row_i, col_i)] = _ActionStats(prior=prior)
 
 
 class MCTSAgent:
@@ -352,6 +380,13 @@ class MCTSAgent:
         rollout_depth: int = 18,
         exploration: float = 1.4,
         rollout_hit_bonus: float = 12.0,
+        gamma: float = 0.97,
+        tree_policy: str = "uct_hybrid",
+        prior_source: str = "blend",
+        leaf_evaluator: str = "heuristic",
+        leaf_samples: int = 16,
+        policy_prior_fn: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+        value_fn: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
         seed: Optional[int] = 0,
     ) -> None:
         self.N = grid_size
@@ -360,6 +395,13 @@ class MCTSAgent:
         self.rollout_depth = int(rollout_depth)
         self.exploration = float(exploration)
         self.rollout_hit_bonus = float(rollout_hit_bonus)
+        self.gamma = float(gamma)
+        self.tree_policy = str(tree_policy)
+        self.prior_source = str(prior_source)
+        self.leaf_evaluator = str(leaf_evaluator)
+        self.leaf_samples = int(leaf_samples)
+        self.policy_prior_fn = policy_prior_fn
+        self.value_fn = value_fn
         self.rng = np.random.default_rng(seed)
 
         self.revealed = np.zeros((grid_size, grid_size), dtype=bool)
@@ -378,11 +420,49 @@ class MCTSAgent:
         best_value = -np.inf
 
         for action, stats in node.action_stats.items():
+            exploit = (stats.total_value / stats.visits) if stats.visits > 0 else 0.0
             if stats.visits == 0:
-                return action
-            exploit = stats.total_value / stats.visits
-            explore = self.exploration * np.sqrt(np.log(node.visits + 1.0) / stats.visits)
-            score = exploit + explore
+                if self.tree_policy == "uct":
+                    score = float("inf")
+                elif self.tree_policy == "puct":
+                    score = (
+                        exploit
+                        + self.exploration
+                        * stats.prior
+                        * np.sqrt(node.visits + 1.0)
+                    )
+                elif self.tree_policy == "uct_hybrid":
+                    score = float("inf")
+                else:
+                    raise ValueError(f"Unknown tree_policy: {self.tree_policy}")
+            else:
+                if self.tree_policy == "uct":
+                    explore = self.exploration * np.sqrt(
+                        np.log(node.visits + 1.0) / stats.visits
+                    )
+                    score = exploit + explore
+                elif self.tree_policy == "puct":
+                    explore = (
+                        self.exploration
+                        * stats.prior
+                        * np.sqrt(node.visits + 1.0)
+                        / (1.0 + stats.visits)
+                    )
+                    score = exploit + explore
+                elif self.tree_policy == "uct_hybrid":
+                    uct_explore = self.exploration * np.sqrt(
+                        np.log(node.visits + 1.0) / stats.visits
+                    )
+                    prior_bonus = (
+                        0.25
+                        * self.exploration
+                        * stats.prior
+                        * np.sqrt(node.visits + 1.0)
+                        / (1.0 + stats.visits)
+                    )
+                    score = exploit + uct_explore + prior_bonus
+                else:
+                    raise ValueError(f"Unknown tree_policy: {self.tree_policy}")
             if score > best_value:
                 best_value = score
                 best_action = action
@@ -393,15 +473,89 @@ class MCTSAgent:
             return int(row), int(col)
         return best_action
 
+    def _heuristic_priors(self, revealed: np.ndarray, hit_mask: np.ndarray) -> np.ndarray:
+        score = _probability_density_scores(
+            revealed,
+            hit_mask,
+            self.ship_lengths,
+            hit_bonus=self.rollout_hit_bonus,
+        )
+        return _normalize_action_probs(score, revealed)
+
+    def _neural_priors(self, revealed: np.ndarray, hit_mask: np.ndarray) -> np.ndarray:
+        if self.policy_prior_fn is None:
+            return np.zeros(revealed.shape, dtype=np.float64)
+        raw = self.policy_prior_fn(hit_mask.copy(), revealed.copy())
+        return _normalize_action_probs(np.asarray(raw, dtype=np.float64), revealed)
+
+    def _compute_action_priors(self, revealed: np.ndarray, hit_mask: np.ndarray) -> np.ndarray:
+        heuristic = self._heuristic_priors(revealed, hit_mask)
+        neural = self._neural_priors(revealed, hit_mask)
+
+        if self.prior_source == "heuristic":
+            return heuristic
+        if self.prior_source == "neural":
+            return neural if neural.sum() > 0 else heuristic
+        if self.prior_source == "blend":
+            if neural.sum() <= 0:
+                return heuristic
+            mixed = 0.5 * heuristic + 0.5 * neural
+            return _normalize_action_probs(mixed, revealed)
+        raise ValueError(f"Unknown prior_source: {self.prior_source}")
+
+    def _heuristic_leaf_value(self, revealed: np.ndarray, hit_mask: np.ndarray) -> float:
+        posterior = estimate_posterior_occupancy(
+            revealed,
+            hit_mask,
+            n_samples=self.leaf_samples,
+            rng=self.rng,
+        )
+        total_ship_cells = float(sum(self.ship_lengths))
+        progress = float(hit_mask.sum()) / max(total_ship_cells, 1.0)
+        unknown = ~revealed
+        if np.any(unknown):
+            next_hit = float(posterior[unknown].max())
+            p = np.clip(posterior[unknown], 1e-6, 1.0 - 1e-6)
+            entropy = -p * np.log(p) - (1.0 - p) * np.log(1.0 - p)
+            certainty = 1.0 - float(entropy.mean() / np.log(2.0))
+        else:
+            next_hit = 0.0
+            certainty = 1.0
+        value = 0.55 * progress + 0.30 * next_hit + 0.15 * certainty
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _evaluate_leaf(
+        self,
+        revealed: np.ndarray,
+        hit_mask: np.ndarray,
+        hidden_board: np.ndarray,
+        discount: float,
+    ) -> tuple[float, int]:
+        if self.value_fn is not None:
+            guided_value = float(self.value_fn(hit_mask.copy(), revealed.copy()))
+            return discount * float(np.clip(guided_value, 0.0, 1.0)), 0
+
+        if self.leaf_evaluator == "heuristic":
+            return discount * self._heuristic_leaf_value(revealed, hit_mask), 0
+        if self.leaf_evaluator == "rollout":
+            return self._rollout(revealed, hit_mask, hidden_board, discount)
+        if self.leaf_evaluator == "hybrid":
+            heuristic_value = discount * self._heuristic_leaf_value(revealed, hit_mask)
+            rollout_value, rollout_steps = self._rollout(revealed, hit_mask, hidden_board, discount)
+            return 0.5 * (heuristic_value + rollout_value), rollout_steps
+        raise ValueError(f"Unknown leaf_evaluator: {self.leaf_evaluator}")
+
     def _rollout(
         self,
         revealed: np.ndarray,
         hit_mask: np.ndarray,
         hidden_board: np.ndarray,
-    ) -> int:
+        discount: float,
+    ) -> tuple[float, int]:
         rollout_steps = 0
         current_revealed = revealed.copy()
         current_hit_mask = hit_mask.copy()
+        rollout_value = 0.0
 
         while rollout_steps < self.rollout_depth and not _terminal(
             current_revealed, current_hit_mask, hidden_board
@@ -413,24 +567,36 @@ class MCTSAgent:
                 hit_bonus=self.rollout_hit_bonus,
             )
             action = _sample_argmax(score, self.rng)
-            current_revealed, current_hit_mask, _ = _step(
+            current_revealed, current_hit_mask, is_hit = _step(
                 current_revealed, current_hit_mask, hidden_board, action
             )
+            if is_hit:
+                rollout_value += discount
+            discount *= self.gamma
             rollout_steps += 1
 
         while not _terminal(current_revealed, current_hit_mask, hidden_board):
             unknown = np.argwhere(~current_revealed)
             row, col = unknown[int(self.rng.integers(len(unknown)))]
-            current_revealed, current_hit_mask, _ = _step(
+            current_revealed, current_hit_mask, is_hit = _step(
                 current_revealed, current_hit_mask, hidden_board, (int(row), int(col))
             )
+            if is_hit:
+                rollout_value += discount
+            discount *= self.gamma
             rollout_steps += 1
 
-        return rollout_steps
+        rollout_value += 0.05 * discount
+        return rollout_value, rollout_steps
 
     def _run_search(self) -> _SearchNode:
-        root = _SearchNode(self.revealed.copy(), self.hit_mask.copy())
-        if not root.unexpanded_actions:
+        root_priors = self._compute_action_priors(self.revealed, self.hit_mask)
+        root = _SearchNode(
+            self.revealed.copy(),
+            self.hit_mask.copy(),
+            root_priors,
+        )
+        if not root.action_stats:
             return root
 
         for _ in range(self.n_simulations):
@@ -445,35 +611,26 @@ class MCTSAgent:
             path_nodes = [root]
             path_edges: list[tuple[_SearchNode, tuple[int, int]]] = []
             total_steps = 0
+            value = 0.0
+            discount = 1.0
 
             while not _terminal(node.revealed, node.hit_mask, hidden_board):
-                if node.unexpanded_actions:
-                    action_idx = int(self.rng.integers(len(node.unexpanded_actions)))
-                    action = node.unexpanded_actions.pop(action_idx)
-                    stats = node.action_stats.setdefault(action, _ActionStats())
-
-                    next_revealed, next_hit_mask, is_hit = _step(
-                        node.revealed, node.hit_mask, hidden_board, action
-                    )
-                    child = stats.children.get(is_hit)
-                    if child is None:
-                        child = _SearchNode(next_revealed, next_hit_mask)
-                        stats.children[is_hit] = child
-
-                    path_edges.append((node, action))
-                    node = child
-                    path_nodes.append(node)
-                    total_steps += 1
-                    break
-
                 action = self._select_action(node)
                 stats = node.action_stats[action]
                 next_revealed, next_hit_mask, is_hit = _step(
                     node.revealed, node.hit_mask, hidden_board, action
                 )
+                if is_hit:
+                    value += discount
+                discount *= self.gamma
                 child = stats.children.get(is_hit)
                 if child is None:
-                    child = _SearchNode(next_revealed, next_hit_mask)
+                    child_priors = self._compute_action_priors(next_revealed, next_hit_mask)
+                    child = _SearchNode(
+                        next_revealed,
+                        next_hit_mask,
+                        child_priors,
+                    )
                     stats.children[is_hit] = child
 
                 path_edges.append((node, action))
@@ -484,28 +641,41 @@ class MCTSAgent:
                 if stats.visits == 0:
                     break
 
-            if not _terminal(node.revealed, node.hit_mask, hidden_board):
-                total_steps += self._rollout(node.revealed, node.hit_mask, hidden_board)
+            if _terminal(node.revealed, node.hit_mask, hidden_board):
+                value += discount
+            else:
+                leaf_value, rollout_steps = self._evaluate_leaf(
+                    node.revealed,
+                    node.hit_mask,
+                    hidden_board,
+                    discount,
+                )
+                value += leaf_value
+                total_steps += rollout_steps
 
-            value = 1.0 / max(total_steps, 1)
+            value += 0.05 / max(total_steps, 1)
 
             for visited_node in path_nodes:
                 visited_node.visits += 1
             for parent, action in path_edges:
-                stats = parent.action_stats.setdefault(action, _ActionStats())
+                stats = parent.action_stats[action]
                 stats.visits += 1
                 stats.total_value += value
 
         return root
 
     def beliefs(self) -> np.ndarray:
+        if not self.hit_mask.any():
+            return self._compute_action_priors(self.revealed, self.hit_mask)
+
         root = self._run_search()
         score = np.zeros((self.N, self.N), dtype=np.float64)
 
         if root.action_stats:
             for action, stats in root.action_stats.items():
                 row, col = action
-                score[row, col] = float(stats.visits)
+                q_value = (stats.total_value / stats.visits) if stats.visits > 0 else 0.0
+                score[row, col] = float(stats.visits) + 5.0 * max(q_value, 0.0) + stats.prior
         else:
             score[~self.revealed] = 1.0
 
