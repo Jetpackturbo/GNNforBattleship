@@ -54,7 +54,7 @@ run_train "GNN on PDF Teacher" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
   --teacher-policy probability_density \
-  --no-tqdm
+  # --no-tqdm
 
 run_train "GNN-ATTN on PDF Teacher" \
   --model attn \
@@ -70,7 +70,7 @@ run_train "GNN-ATTN on PDF Teacher" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
   --teacher-policy probability_density \
-  --no-tqdm
+  # --no-tqdm
 
 run_train "GNN on MCTS Teacher" \
   --model gnn \
@@ -92,7 +92,7 @@ run_train "GNN on MCTS Teacher" \
   --teacher-mcts-prior-source "$MCTS_PRIOR_SOURCE" \
   --teacher-mcts-leaf-evaluator "$MCTS_LEAF_EVALUATOR" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
-  --no-tqdm
+  # --no-tqdm
 
 run_train "GNN-ATTN on MCTS Teacher" \
   --model attn \
@@ -115,7 +115,7 @@ run_train "GNN-ATTN on MCTS Teacher" \
   --teacher-mcts-prior-source "$MCTS_PRIOR_SOURCE" \
   --teacher-mcts-leaf-evaluator "$MCTS_LEAF_EVALUATOR" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
-  --no-tqdm
+  # --no-tqdm
 
 run_train "GNN on MCTS Teacher with UCT" \
   --model gnn \
@@ -137,7 +137,7 @@ run_train "GNN on MCTS Teacher with UCT" \
   --teacher-mcts-prior-source "$MCTS_PRIOR_SOURCE" \
   --teacher-mcts-leaf-evaluator "$MCTS_LEAF_EVALUATOR" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
-  --no-tqdm
+  # --no-tqdm
 
 run_train "GNN-ATTN on MCTS Teacher with UCT" \
   --model attn \
@@ -160,7 +160,7 @@ run_train "GNN-ATTN on MCTS Teacher with UCT" \
   --teacher-mcts-prior-source "$MCTS_PRIOR_SOURCE" \
   --teacher-mcts-leaf-evaluator "$MCTS_LEAF_EVALUATOR" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
-  --no-tqdm
+  # --no-tqdm
 
 echo
 echo "Finished training requested checkpoint suite in $CHECKPOINT_DIR"
