@@ -32,6 +32,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from battleship_ising import BattleshipGame, BattleshipIsing
+from mcts import MCTSAgent, bayesian_surprise, estimate_posterior_occupancy
 
 try:
     from torch_geometric.nn import MessagePassing
@@ -528,27 +529,94 @@ class IsingBPAgent:
 def _generate_policy_sample(
     rng: np.random.Generator,
     max_context_shots: int = 40,
+    teacher_policy: str = "probability_density",
+    teacher_kwargs: Optional[dict[str, Any]] = None,
+    surprise_augmentation: bool = False,
+    surprise_samples: int = 8,
+    surprise_alpha: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate one imitation-learning sample from the probability-density teacher."""
+    """Generate one imitation-learning sample from the chosen teacher policy."""
+    teacher_kwargs = {} if teacher_kwargs is None else dict(teacher_kwargs)
     while True:
         game_seed = int(rng.integers(0, 2**31))
         game = BattleshipGame(grid_size=GRID_SIZE, seed=game_seed)
-        teacher = ProbabilityDensityAgent(grid_size=GRID_SIZE, seed=game_seed)
+        trajectory_agent = ProbabilityDensityAgent(grid_size=GRID_SIZE, seed=game_seed)
         n_steps = int(rng.integers(0, max_context_shots + 1))
+        stored_states: list[tuple[np.ndarray, np.ndarray, float]] = []
+        posterior_rng = np.random.default_rng(game_seed + 17)
+        prev_posterior = None
+
+        if surprise_augmentation:
+            empty_revealed = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
+            empty_hits = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
+            prev_posterior = estimate_posterior_occupancy(
+                empty_revealed,
+                empty_hits,
+                n_samples=surprise_samples,
+                rng=posterior_rng,
+            )
 
         solved = False
         for _ in range(n_steps):
-            row, col = teacher.best_guess()
+            row, col = trajectory_agent.best_guess()
             is_hit = game.shoot(row, col)
-            teacher.observe(row, col, is_hit)
-            if game.all_sunk(teacher.hit_mask):
+            trajectory_agent.observe(row, col, is_hit)
+            if surprise_augmentation:
+                current_posterior = estimate_posterior_occupancy(
+                    trajectory_agent.revealed,
+                    trajectory_agent.hit_mask,
+                    n_samples=surprise_samples,
+                    rng=posterior_rng,
+                )
+                assert prev_posterior is not None
+                surprise_value, _ = bayesian_surprise(prev_posterior, current_posterior)
+                stored_states.append(
+                    (
+                        trajectory_agent.revealed.copy(),
+                        trajectory_agent.hit_mask.copy(),
+                        surprise_value,
+                    )
+                )
+                prev_posterior = current_posterior
+            if game.all_sunk(trajectory_agent.hit_mask):
                 solved = True
                 break
 
-        if not solved and np.any(~teacher.revealed):
-            feats = observation_masks_to_features(teacher.hit_mask, teacher.revealed).numpy()
-            policy = teacher.beliefs().astype(np.float32).flatten()
-            mask = (~teacher.revealed).flatten().astype(bool)
+        if not solved and np.any(~trajectory_agent.revealed):
+            if surprise_augmentation and stored_states:
+                weights = np.array(
+                    [0.1 + max(state_surprise, 0.0) ** surprise_alpha for _, _, state_surprise in stored_states],
+                    dtype=np.float64,
+                )
+                weights /= weights.sum()
+                chosen_idx = int(rng.choice(len(stored_states), p=weights))
+                selected_revealed, selected_hit_mask, _ = stored_states[chosen_idx]
+            else:
+                selected_revealed = trajectory_agent.revealed.copy()
+                selected_hit_mask = trajectory_agent.hit_mask.copy()
+
+            if teacher_policy == "probability_density":
+                planner = ProbabilityDensityAgent(grid_size=GRID_SIZE, seed=game_seed)
+                for row, col in np.argwhere(selected_hit_mask):
+                    planner.observe(int(row), int(col), True)
+                for row, col in np.argwhere(selected_revealed & ~selected_hit_mask):
+                    planner.observe(int(row), int(col), False)
+            elif teacher_policy == "mcts":
+                planner = MCTSAgent(grid_size=GRID_SIZE, seed=game_seed, **teacher_kwargs)
+                observed_hits = np.argwhere(selected_hit_mask)
+                observed_misses = np.argwhere(selected_revealed & ~selected_hit_mask)
+                for row, col in observed_hits:
+                    planner.observe(int(row), int(col), True)
+                for row, col in observed_misses:
+                    planner.observe(int(row), int(col), False)
+            else:
+                raise ValueError(f"Unknown teacher_policy: {teacher_policy}")
+
+            feats = observation_masks_to_features(
+                selected_hit_mask, selected_revealed
+            ).numpy()
+            policy = planner.beliefs().astype(np.float32).flatten()
+            mask = (~selected_revealed).flatten().astype(bool)
             return feats, policy, mask
 
 
@@ -557,6 +625,11 @@ def generate_dataset(
     max_context_shots: int = 40,
     seed: int = 0,
     show_progress: bool = True,
+    teacher_policy: str = "probability_density",
+    teacher_kwargs: Optional[dict[str, Any]] = None,
+    surprise_augmentation: bool = False,
+    surprise_samples: int = 8,
+    surprise_alpha: float = 1.0,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Generate `(features, target_policy, unknown_mask)` samples."""
     rng = np.random.default_rng(seed)
@@ -569,7 +642,17 @@ def generate_dataset(
         leave=False,
     )
     for i in iterator:
-        data.append(_generate_policy_sample(rng, max_context_shots=max_context_shots))
+        data.append(
+            _generate_policy_sample(
+                rng,
+                max_context_shots=max_context_shots,
+                teacher_policy=teacher_policy,
+                teacher_kwargs=teacher_kwargs,
+                surprise_augmentation=surprise_augmentation,
+                surprise_samples=surprise_samples,
+                surprise_alpha=surprise_alpha,
+            )
+        )
         if not show_progress and (i + 1) % 1000 == 0:
             print(f"  Generated {i + 1}/{n_samples} policy states ...")
     return data
@@ -589,20 +672,35 @@ def train_gnn(
     use_pyg: bool = False,
     show_progress: bool = True,
     wandb_run: Any = None,
+    teacher_policy: str = "probability_density",
+    teacher_kwargs: Optional[dict[str, Any]] = None,
+    surprise_augmentation: bool = False,
+    surprise_samples: int = 8,
+    surprise_alpha: float = 1.0,
 ) -> tuple["BattleshipGNN", dict]:
-    """Train the move-selection GNN by imitating the probability-density teacher."""
+    """Train the move-selection GNN by imitating the chosen teacher policy."""
     print("Generating policy-training data ...")
     train_data = generate_dataset(
         n_train,
         max_context_shots=max_context_shots,
         seed=seed,
         show_progress=show_progress,
+        teacher_policy=teacher_policy,
+        teacher_kwargs=teacher_kwargs,
+        surprise_augmentation=surprise_augmentation,
+        surprise_samples=surprise_samples,
+        surprise_alpha=surprise_alpha,
     )
     val_data = generate_dataset(
         n_val,
         max_context_shots=max_context_shots,
         seed=seed + 1,
         show_progress=show_progress,
+        teacher_policy=teacher_policy,
+        teacher_kwargs=teacher_kwargs,
+        surprise_augmentation=surprise_augmentation,
+        surprise_samples=surprise_samples,
+        surprise_alpha=surprise_alpha,
     )
 
     model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)
@@ -764,6 +862,72 @@ def benchmark_reference() -> str:
     )
 
 
+def summarize_results(
+    results: dict[str, list[int]],
+    ci_level: float = 0.95,
+    bootstrap_samples: int = 1000,
+    seed: int = 0,
+) -> dict[str, dict[str, float]]:
+    """Compute summary statistics, confidence bounds, and ranges."""
+    rng = np.random.default_rng(seed)
+    alpha = (1.0 - ci_level) / 2.0
+    summary: dict[str, dict[str, float]] = {}
+
+    for name, shots in results.items():
+        arr = np.array(shots, dtype=np.float64)
+        if arr.size == 0:
+            summary[name] = {
+                "n_games": 0.0,
+                "mean": float("nan"),
+                "median": float("nan"),
+                "std": float("nan"),
+                "min": float("nan"),
+                "max": float("nan"),
+                "range": float("nan"),
+                "ci_level": ci_level,
+                "mean_ci_low": float("nan"),
+                "mean_ci_high": float("nan"),
+                "median_ci_low": float("nan"),
+                "median_ci_high": float("nan"),
+                "mean_err_low": float("nan"),
+                "mean_err_high": float("nan"),
+                "median_err_low": float("nan"),
+                "median_err_high": float("nan"),
+            }
+            continue
+
+        boot_idx = rng.integers(0, arr.size, size=(bootstrap_samples, arr.size))
+        boot_samples = arr[boot_idx]
+        boot_means = boot_samples.mean(axis=1)
+        boot_medians = np.median(boot_samples, axis=1)
+
+        mean = float(arr.mean())
+        median = float(np.median(arr))
+        mean_ci_low, mean_ci_high = np.quantile(boot_means, [alpha, 1.0 - alpha])
+        median_ci_low, median_ci_high = np.quantile(boot_medians, [alpha, 1.0 - alpha])
+
+        summary[name] = {
+            "n_games": float(arr.size),
+            "mean": mean,
+            "median": median,
+            "std": float(arr.std()),
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+            "range": float(arr.max() - arr.min()),
+            "ci_level": ci_level,
+            "mean_ci_low": float(mean_ci_low),
+            "mean_ci_high": float(mean_ci_high),
+            "median_ci_low": float(median_ci_low),
+            "median_ci_high": float(median_ci_high),
+            "mean_err_low": float(mean - mean_ci_low),
+            "mean_err_high": float(mean_ci_high - mean),
+            "median_err_low": float(median - median_ci_low),
+            "median_err_high": float(median_ci_high - median),
+        }
+
+    return summary
+
+
 def compare_all_agents(
     n_games: int = 200,
     gnn_model: Optional[BattleshipGNN] = None,
@@ -773,6 +937,8 @@ def compare_all_agents(
     extra_agents: Optional[dict[str, object]] = None,
     show_progress: bool = True,
     wandb_run: Any = None,
+    include_mcts: bool = False,
+    mcts_kwargs: Optional[dict[str, Any]] = None,
 ) -> dict[str, list[int]]:
     """Run the DataGenetics-style benchmark suite on shared game instances."""
     agents: dict[str, object] = {
@@ -781,6 +947,8 @@ def compare_all_agents(
         "Probability Density": ProbabilityDensityAgent(seed=seed),
         "Ising BP": IsingBPAgent(),
     }
+    if include_mcts:
+        agents["MCTS"] = MCTSAgent(seed=seed, **({} if mcts_kwargs is None else mcts_kwargs))
     if gnn_model is not None:
         agents["GNN Policy"] = GNNAgent(gnn_model, device=device)
     if extra_agents:
@@ -805,20 +973,39 @@ def compare_all_agents(
             print(f"  Completed {game_idx + 1}/{n_games} games ...")
 
     if verbose:
+        summary = summarize_results(results, seed=seed)
         print("\nBenchmark source:")
         print(f"  {benchmark_reference()}")
         print("\nResults")
-        print(f"  {'Agent':<20} {'Mean':>6} {'Median':>7} {'Std':>6}")
-        print(f"  {'-' * 20} {'-' * 6} {'-' * 7} {'-' * 6}")
-        for name, shots in results.items():
-            arr = np.array(shots, dtype=np.float64)
-            print(f"  {name:<20} {arr.mean():6.1f} {np.median(arr):7.1f} {arr.std():6.1f}")
+        print(
+            f"  {'Agent':<20} {'Mean':>6} {'Median':>7} {'Std':>6} "
+            f"{'Mean 95% CI':>22} {'Median 95% CI':>24} {'Range':>11}"
+        )
+        print(
+            f"  {'-' * 20} {'-' * 6} {'-' * 7} {'-' * 6} "
+            f"{'-' * 22} {'-' * 24} {'-' * 11}"
+        )
+        for name in results:
+            stats = summary[name]
+            mean_ci = f"[{stats['mean_ci_low']:.1f}, {stats['mean_ci_high']:.1f}]"
+            median_ci = f"[{stats['median_ci_low']:.1f}, {stats['median_ci_high']:.1f}]"
+            value_range = f"[{stats['min']:.0f}, {stats['max']:.0f}]"
+            print(
+                f"  {name:<20} {stats['mean']:6.1f} {stats['median']:7.1f} {stats['std']:6.1f} "
+                f"{mean_ci:>22} {median_ci:>24} {value_range:>11}"
+            )
             _wandb_log(
                 wandb_run,
                 {
-                    f"benchmark/{name}/mean_shots": float(arr.mean()),
-                    f"benchmark/{name}/median_shots": float(np.median(arr)),
-                    f"benchmark/{name}/std_shots": float(arr.std()),
+                    f"benchmark/{name}/mean_shots": stats["mean"],
+                    f"benchmark/{name}/median_shots": stats["median"],
+                    f"benchmark/{name}/std_shots": stats["std"],
+                    f"benchmark/{name}/mean_ci_low": stats["mean_ci_low"],
+                    f"benchmark/{name}/mean_ci_high": stats["mean_ci_high"],
+                    f"benchmark/{name}/median_ci_low": stats["median_ci_low"],
+                    f"benchmark/{name}/median_ci_high": stats["median_ci_high"],
+                    f"benchmark/{name}/min_shots": stats["min"],
+                    f"benchmark/{name}/max_shots": stats["max"],
                 },
             )
         print()

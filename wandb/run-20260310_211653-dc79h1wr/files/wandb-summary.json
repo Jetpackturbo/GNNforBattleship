@@ -1,0 +1,1 @@
+{"_timestamp":1.7732048217465258e+09,"val_top1":0.7268591772151899,"checkpoint_path":"/homes/iws/jackpli/courses/GNNforBattleship/checkpoints/gnn-policy-large.pt","val_loss":2.664690769171413,"final_val_top1":0.7268591772151899,"_wandb":{"runtime":2207},"train_loss":2.672115810082087,"train_top1":0.7115009590183072,"_step":30,"_runtime":2207.21014839,"epoch":30}

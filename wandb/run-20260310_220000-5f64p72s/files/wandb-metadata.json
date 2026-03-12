@@ -1,0 +1,65 @@
+{
+  "os": "Linux-6.12.0-124.38.1.el10_1.x86_64-x86_64-with-glibc2.39",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-03-11T05:00:00.397284Z",
+  "args": [
+    "--model",
+    "gnn",
+    "--output",
+    "checkpoints/gnn-policy-large.pt",
+    "--epochs",
+    "30",
+    "--n-train",
+    "25000",
+    "--n-val",
+    "5000",
+    "--batch-size",
+    "64",
+    "--hidden-dim",
+    "64",
+    "--num-layers",
+    "6",
+    "--lr",
+    "3e-4",
+    "--use-wandb",
+    "--wandb-project",
+    "GNNforBattleship",
+    "--wandb-run-name",
+    "gnn-large-25k"
+  ],
+  "program": "/homes/iws/jackpli/courses/GNNforBattleship/train_model.py",
+  "codePath": "train_model.py",
+  "codePathLocal": "train_model.py",
+  "git": {
+    "remote": "git@github.com:Jetpackturbo/GNNforBattleship.git",
+    "commit": "1501f2a7338b577c1b31920ec9f36d495842c8a4"
+  },
+  "email": "jackpli@uw.edu",
+  "root": "/homes/iws/jackpli/courses/GNNforBattleship",
+  "host": "syrax.cs.washington.edu",
+  "executable": "/usr/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "274743689216",
+      "used": "32904720384"
+    }
+  },
+  "memory": {
+    "total": "66991673344"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "memoryTotal": "34190917632",
+      "cudaCores": 21760,
+      "architecture": "Blackwell",
+      "uuid": "GPU-fb360b3c-c717-ffc7-3ab5-3e15d43a943d"
+    }
+  ],
+  "cudaVersion": "13.1",
+  "writerId": "f8ha4ddpbkjxyw9pl0d645s2vezeecs5"
+}

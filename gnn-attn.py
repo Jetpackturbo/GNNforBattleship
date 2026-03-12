@@ -239,6 +239,11 @@ def train_attention_gnn(
     device: str = "cpu",
     show_progress: bool = True,
     wandb_run: Any = None,
+    teacher_policy: str = "probability_density",
+    teacher_kwargs: Optional[dict[str, Any]] = None,
+    surprise_augmentation: bool = False,
+    surprise_samples: int = 8,
+    surprise_alpha: float = 1.0,
 ) -> tuple["BattleshipAttentionGNN", dict]:
     """Train the attention-based policy network against the same teacher."""
     print("Generating policy-training data for attention GNN ...")
@@ -247,12 +252,22 @@ def train_attention_gnn(
         max_context_shots=max_context_shots,
         seed=seed,
         show_progress=show_progress,
+        teacher_policy=teacher_policy,
+        teacher_kwargs=teacher_kwargs,
+        surprise_augmentation=surprise_augmentation,
+        surprise_samples=surprise_samples,
+        surprise_alpha=surprise_alpha,
     )
     val_data = generate_dataset(
         n_val,
         max_context_shots=max_context_shots,
         seed=seed + 1,
         show_progress=show_progress,
+        teacher_policy=teacher_policy,
+        teacher_kwargs=teacher_kwargs,
+        surprise_augmentation=surprise_augmentation,
+        surprise_samples=surprise_samples,
+        surprise_alpha=surprise_alpha,
     )
 
     model = BattleshipAttentionGNN(

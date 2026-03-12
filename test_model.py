@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-from gnn import BattleshipGNN, benchmark_reference, compare_all_agents
+from gnn import BattleshipGNN, benchmark_reference, compare_all_agents, summarize_results
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,13 +47,35 @@ def _init_wandb_run(args: argparse.Namespace, config: dict):
     else:
         wandb.login()
 
-    return wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.wandb_run_name,
-        mode=args.wandb_mode,
-        config=config,
-    )
+    wandb_root = ROOT / ".wandb"
+    wandb_cache = wandb_root / "cache"
+    wandb_config = wandb_root / "config"
+    wandb_root.mkdir(exist_ok=True)
+    wandb_cache.mkdir(exist_ok=True)
+    wandb_config.mkdir(exist_ok=True)
+
+    os.environ.setdefault("WANDB_DIR", str(wandb_root))
+    os.environ.setdefault("WANDB_CACHE_DIR", str(wandb_cache))
+    os.environ.setdefault("WANDB_CONFIG_DIR", str(wandb_config))
+
+    settings = wandb.Settings(start_method="thread")
+    init_kwargs = {
+        "project": args.wandb_project,
+        "entity": args.wandb_entity,
+        "name": args.wandb_run_name,
+        "mode": args.wandb_mode,
+        "config": config,
+        "settings": settings,
+    }
+
+    try:
+        return wandb.init(**init_kwargs)
+    except Exception:
+        if args.wandb_mode == "online":
+            print("wandb online init failed; falling back to offline mode.")
+            init_kwargs["mode"] = "offline"
+            return wandb.init(**init_kwargs)
+        raise
 
 
 def _load_checkpoint(path: Path, device: str) -> tuple[str, object]:
@@ -85,6 +107,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--n-games", type=int, default=200)
     parser.add_argument("--seed", type=int, default=100)
+    parser.add_argument(
+        "--include-mcts",
+        action="store_true",
+        help="Include the MCTS planning baseline in the benchmark.",
+    )
+    parser.add_argument("--mcts-simulations", type=int, default=96)
+    parser.add_argument("--mcts-rollout-depth", type=int, default=18)
+    parser.add_argument("--mcts-exploration", type=float, default=1.4)
     parser.add_argument(
         "--save-json",
         help="Optional path to save benchmark results as JSON.",
@@ -119,6 +149,7 @@ def main() -> None:
         "seed": args.seed,
         "device": args.device,
         "checkpoints": list(args.checkpoint),
+        "include_mcts": args.include_mcts,
     }
     wandb_run = _init_wandb_run(args, config)
 
@@ -154,13 +185,26 @@ def main() -> None:
             extra_agents=extra_agents if extra_agents else None,
             show_progress=not args.no_tqdm,
             wandb_run=wandb_run,
+            include_mcts=args.include_mcts,
+            mcts_kwargs={
+                "n_simulations": args.mcts_simulations,
+                "rollout_depth": args.mcts_rollout_depth,
+                "exploration": args.mcts_exploration,
+            },
         )
 
         if args.save_json:
             save_path = Path(args.save_json).expanduser().resolve()
             save_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "benchmark_reference": benchmark_reference(),
+                "n_games": args.n_games,
+                "seed": args.seed,
+                "raw_results": results,
+                "summary": summarize_results(results, seed=args.seed),
+            }
             with save_path.open("w", encoding="utf-8") as fh:
-                json.dump(results, fh, indent=2)
+                json.dump(payload, fh, indent=2)
             print(f"Saved benchmark results to {save_path}")
             if wandb_run is not None:
                 wandb_run.summary["results_json"] = str(save_path)

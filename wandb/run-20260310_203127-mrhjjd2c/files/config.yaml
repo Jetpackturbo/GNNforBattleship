@@ -1,0 +1,112 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        e:
+            lo2aau02rmzcxamse4luj7e5irywpf3x:
+                args:
+                    - --model
+                    - gnn
+                    - --output
+                    - checkpoints/gnn-policy-large.pt
+                    - --epochs
+                    - "30"
+                    - --n-train
+                    - "25000"
+                    - --n-val
+                    - "5000"
+                    - --batch-size
+                    - "64"
+                    - --hidden-dim
+                    - "64"
+                    - --num-layers
+                    - "6"
+                    - --lr
+                    - "3e-4"
+                    - --use-wandb
+                    - --wandb-project
+                    - GNNforBattleship
+                    - --wandb-run-name
+                    - gnn-large-25k
+                codePath: train_model.py
+                codePathLocal: train_model.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "274743689216"
+                        used: "32904720384"
+                email: jackpli@uw.edu
+                executable: /usr/bin/python
+                git:
+                    commit: 1501f2a7338b577c1b31920ec9f36d495842c8a4
+                    remote: git@github.com:Jetpackturbo/GNNforBattleship.git
+                gpu: NVIDIA GeForce RTX 5090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 21760
+                      memoryTotal: "34190917632"
+                      name: NVIDIA GeForce RTX 5090
+                      uuid: GPU-fb360b3c-c717-ffc7-3ab5-3e15d43a943d
+                host: syrax.cs.washington.edu
+                memory:
+                    total: "66991673344"
+                os: Linux-6.12.0-124.38.1.el10_1.x86_64-x86_64-with-glibc2.39
+                program: /homes/iws/jackpli/courses/GNNforBattleship/train_model.py
+                python: CPython 3.12.12
+                root: /homes/iws/jackpli/courses/GNNforBattleship
+                startedAt: "2026-03-11T03:31:27.271531Z"
+                writerId: lo2aau02rmzcxamse4luj7e5irywpf3x
+        m: []
+        python_version: 3.12.12
+        t:
+            "1":
+                - 1
+                - 11
+                - 49
+                - 77
+            "2":
+                - 1
+                - 11
+                - 49
+                - 77
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+                - 62
+            "4": 3.12.12
+            "5": 0.23.0
+            "6": 4.57.3
+            "12": 0.23.0
+            "13": linux-x86_64
+batch_size:
+    value: 64
+device:
+    value: cpu
+hidden_dim:
+    value: 64
+lr:
+    value: 0.0003
+max_context_shots:
+    value: 40
+model:
+    value: gnn
+n_epochs:
+    value: 30
+n_train:
+    value: 25000
+n_val:
+    value: 5000
+num_heads:
+    value: 4
+num_layers:
+    value: 6
+output:
+    value: /homes/iws/jackpli/courses/GNNforBattleship/checkpoints/gnn-policy-large.pt
+seed:
+    value: 0
+use_pyg:
+    value: false

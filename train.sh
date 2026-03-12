@@ -1,0 +1,18 @@
+python train_model.py \
+  --model gnn \
+  --output checkpoints/gnn-policy-mcts-large.pt \
+  --epochs 30 \
+  --n-train 25000 \
+  --n-val 5000 \
+  --batch-size 64 \
+  --hidden-dim 64 \
+  --num-layers 6 \
+  --lr 3e-4 \
+  --teacher-policy mcts \
+  --teacher-mcts-simulations 32 \
+  --teacher-mcts-rollout-depth 10 \
+  --teacher-mcts-exploration 1.4 \
+  --use-wandb \
+  --wandb-project GNNforBattleship \
+  --wandb-run-name gnn-mcts-teacher-25k \
+  --device cuda:0

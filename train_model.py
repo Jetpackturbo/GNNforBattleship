@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from gnn import train_gnn
+from gnn import GRID_SIZE, SHIP_LENGTHS, benchmark_reference, train_gnn
 
 
 ROOT = Path(__file__).resolve().parent
@@ -45,13 +45,35 @@ def _init_wandb_run(args: argparse.Namespace, config: dict):
     else:
         wandb.login()
 
-    return wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.wandb_run_name,
-        mode=args.wandb_mode,
-        config=config,
-    )
+    wandb_root = ROOT / ".wandb"
+    wandb_cache = wandb_root / "cache"
+    wandb_config = wandb_root / "config"
+    wandb_root.mkdir(exist_ok=True)
+    wandb_cache.mkdir(exist_ok=True)
+    wandb_config.mkdir(exist_ok=True)
+
+    os.environ.setdefault("WANDB_DIR", str(wandb_root))
+    os.environ.setdefault("WANDB_CACHE_DIR", str(wandb_cache))
+    os.environ.setdefault("WANDB_CONFIG_DIR", str(wandb_config))
+
+    settings = wandb.Settings(start_method="thread")
+    init_kwargs = {
+        "project": args.wandb_project,
+        "entity": args.wandb_entity,
+        "name": args.wandb_run_name,
+        "mode": args.wandb_mode,
+        "config": config,
+        "settings": settings,
+    }
+
+    try:
+        return wandb.init(**init_kwargs)
+    except Exception:
+        if args.wandb_mode == "online":
+            print("wandb online init failed; falling back to offline mode.")
+            init_kwargs["mode"] = "offline"
+            return wandb.init(**init_kwargs)
+        raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +90,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-context-shots", type=int, default=40)
+    parser.add_argument(
+        "--teacher-policy",
+        choices=["probability_density", "mcts"],
+        default="probability_density",
+    )
+    parser.add_argument(
+        "--teacher-mcts-simulations",
+        type=int,
+        default=32,
+        help="Number of simulations per MCTS teacher query.",
+    )
+    parser.add_argument(
+        "--teacher-mcts-rollout-depth",
+        type=int,
+        default=10,
+        help="Rollout depth for the MCTS teacher.",
+    )
+    parser.add_argument(
+        "--teacher-mcts-exploration",
+        type=float,
+        default=1.4,
+        help="UCT exploration constant for the MCTS teacher.",
+    )
+    parser.add_argument(
+        "--surprise-augmentation",
+        action="store_true",
+        help="Bias sampled training states toward high Bayesian surprise observations.",
+    )
+    parser.add_argument(
+        "--surprise-samples",
+        type=int,
+        default=8,
+        help="Posterior samples used to estimate Bayesian surprise.",
+    )
+    parser.add_argument(
+        "--surprise-alpha",
+        type=float,
+        default=1.0,
+        help="Exponent controlling how strongly surprise biases state selection.",
+    )
     parser.add_argument(
         "--num-heads",
         type=int,
@@ -118,13 +180,40 @@ def main() -> None:
         "seed": args.seed,
         "device": args.device,
     }
+    teacher_kwargs = None
+    if args.teacher_policy == "mcts":
+        teacher_kwargs = {
+            "n_simulations": args.teacher_mcts_simulations,
+            "rollout_depth": args.teacher_mcts_rollout_depth,
+            "exploration": args.teacher_mcts_exploration,
+        }
 
     config = {
         "model": args.model,
         "output": str(output_path),
+        "task": "battleship_next_move_prediction",
+        "training_objective": f"imitate_{args.teacher_policy}_teacher",
+        "teacher_policy": args.teacher_policy,
+        "board_size": GRID_SIZE,
+        "num_cells": GRID_SIZE * GRID_SIZE,
+        "ship_lengths": list(SHIP_LENGTHS),
+        "observation_features": [
+            "is_hit",
+            "is_miss",
+            "is_unknown",
+            "row_normalized",
+            "col_normalized",
+        ],
+        "input_feature_dim": 5,
+        "label_type": "policy_distribution_over_unrevealed_cells",
+        "benchmark_reference": benchmark_reference(),
         **common_train_kwargs,
         "num_heads": args.num_heads,
         "use_pyg": args.use_pyg,
+        "teacher_kwargs": teacher_kwargs,
+        "surprise_augmentation": args.surprise_augmentation,
+        "surprise_samples": args.surprise_samples,
+        "surprise_alpha": args.surprise_alpha,
     }
     wandb_run = _init_wandb_run(args, config)
 
@@ -139,6 +228,11 @@ def main() -> None:
                 use_pyg=args.use_pyg,
                 show_progress=not args.no_tqdm,
                 wandb_run=wandb_run,
+                teacher_policy=args.teacher_policy,
+                teacher_kwargs=teacher_kwargs,
+                surprise_augmentation=args.surprise_augmentation,
+                surprise_samples=args.surprise_samples,
+                surprise_alpha=args.surprise_alpha,
                 **common_train_kwargs,
             )
         else:
@@ -152,6 +246,11 @@ def main() -> None:
                 num_heads=args.num_heads,
                 show_progress=not args.no_tqdm,
                 wandb_run=wandb_run,
+                teacher_policy=args.teacher_policy,
+                teacher_kwargs=teacher_kwargs,
+                surprise_augmentation=args.surprise_augmentation,
+                surprise_samples=args.surprise_samples,
+                surprise_alpha=args.surprise_alpha,
                 **common_train_kwargs,
             )
 
@@ -159,6 +258,11 @@ def main() -> None:
             "model_type": args.model,
             "model_kwargs": model_kwargs,
             "train_kwargs": common_train_kwargs,
+            "teacher_policy": args.teacher_policy,
+            "teacher_kwargs": teacher_kwargs,
+            "surprise_augmentation": args.surprise_augmentation,
+            "surprise_samples": args.surprise_samples,
+            "surprise_alpha": args.surprise_alpha,
             "history": history,
             "state_dict": model.state_dict(),
         }
