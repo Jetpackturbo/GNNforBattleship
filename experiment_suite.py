@@ -2,8 +2,6 @@
 # coding: utf-8
 """Run the requested Battleship experiment suite, plots, and GIF exports."""
 
-from __future__ import annotations
-
 import argparse
 import importlib.util
 import json
@@ -35,9 +33,21 @@ from gnn import (
 )
 from mcts import MCTSAgent, bayesian_surprise, estimate_posterior_occupancy
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None  # type: ignore
+
 
 ROOT = Path(__file__).resolve().parent
 GRID_SIZE = 10
+
+
+def _maybe_tqdm(iterable, *, enabled: bool, **kwargs):
+    """Wrap an iterable in tqdm when available and requested."""
+    if enabled and tqdm is not None:
+        return tqdm(iterable, **kwargs)
+    return iterable
 
 
 def _load_attention_module():
@@ -177,7 +187,13 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _run_benchmarks(agent_specs: list[AgentSpec], n_games: int, seed: int) -> dict[str, list[int]]:
     results: dict[str, list[int]] = {spec.label: [] for spec in agent_specs}
-    for game_idx in range(n_games):
+    game_iter = _maybe_tqdm(
+        range(n_games),
+        enabled=True,
+        total=n_games,
+        desc="Benchmark games",
+    )
+    for game_idx in game_iter:
         game_seed = seed + game_idx
         game = BattleshipGame(seed=game_seed)
         for spec in agent_specs:
@@ -235,7 +251,13 @@ def _run_surprise_trajectories(
 ) -> tuple[dict[str, list[list[float]]], dict[str, list[list[float]]]]:
     surprise_by_agent: dict[str, list[list[float]]] = {spec.label: [] for spec in agent_specs}
     entropy_by_agent: dict[str, list[list[float]]] = {spec.label: [] for spec in agent_specs}
-    for game_idx in range(n_games):
+    board_iter = _maybe_tqdm(
+        range(n_games),
+        enabled=True,
+        total=n_games,
+        desc="Surprise boards",
+    )
+    for game_idx in board_iter:
         board_seed = seed + game_idx
         base_revealed = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
         base_hit_mask = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)

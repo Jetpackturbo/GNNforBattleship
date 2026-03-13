@@ -2,8 +2,6 @@
 # coding: utf-8
 """Generate benchmark summary plots and temporal Battleship heatmaps."""
 
-from __future__ import annotations
-
 import argparse
 import importlib.util
 import json
@@ -15,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from battleship_ising import BattleshipGame
+from battleship_ising import BattleshipGame, BattleshipIsing
 from gnn import (
     BattleshipGNN,
     GNNAgent,
@@ -42,7 +40,13 @@ def _load_attention_module():
 
 
 def _load_checkpoint(path: Path, device: str) -> tuple[str, object]:
-    checkpoint: dict[str, Any] = torch.load(path, map_location=device)
+    # Always load checkpoints onto CPU first for maximum compatibility across
+    # different CUDA / device setups, then move the constructed model to
+    # the requested device. If an empty string is passed as the device (e.g.
+    # from an unset shell variable), fall back to CPU.
+    if not device:
+        device = "cpu"
+    checkpoint: dict[str, Any] = torch.load(path, map_location="cpu")
     model_type = checkpoint["model_type"]
     model_kwargs = checkpoint["model_kwargs"]
 
@@ -220,7 +224,8 @@ def _plot_temporal_heatmaps(
 
     for ax, (step, heatmap, snapshot_revealed, snapshot_hits) in zip(axes.flat, heatmaps):
         ax.axis("on")
-        im = ax.imshow(heatmap, cmap="hot", vmin=0.0, vmax=1.0)
+        # Blue = low probability, red = high probability.
+        im = ax.imshow(heatmap, cmap="coolwarm", vmin=0.0, vmax=1.0)
         ax.set_title(f"Step {step}")
         ax.set_xticks(range(GRID_SIZE))
         ax.set_yticks(range(GRID_SIZE))
@@ -379,6 +384,62 @@ def _plot_surprise_curves(
     plt.close(fig)
 
 
+def _plot_bp_hit_miss_delta(
+    output: Path,
+    row: int,
+    col: int,
+    bp_iters: int,
+    J: float,
+) -> None:
+    """Plot BP posterior heatmaps for a forced hit vs miss and their delta."""
+    if not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE):
+        raise ValueError(f"row/col must be within [0, {GRID_SIZE - 1}]")
+
+    ising_hit = BattleshipIsing(grid_size=GRID_SIZE, J=J)
+    ising_hit.observe(row, col, True)
+    ising_hit.run_bp(num_iter=bp_iters)
+    p_hit = ising_hit.beliefs()
+
+    ising_miss = BattleshipIsing(grid_size=GRID_SIZE, J=J)
+    ising_miss.observe(row, col, False)
+    ising_miss.run_bp(num_iter=bp_iters)
+    p_miss = ising_miss.beliefs()
+
+    delta = p_hit - p_miss
+    max_abs = float(np.max(np.abs(delta)))
+    vlim = max(max_abs, 1e-6)
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    for ax in axes:
+        ax.set_xticks(range(GRID_SIZE))
+        ax.set_yticks(range(GRID_SIZE))
+        ax.set_xticklabels(list("ABCDEFGHIJ"))
+        ax.set_xlim(-0.5, GRID_SIZE - 0.5)
+        ax.set_ylim(GRID_SIZE - 0.5, -0.5)
+
+    # Blue = low probability, red = high probability.
+    im0 = axes[0].imshow(p_hit, cmap="coolwarm", vmin=0.0, vmax=1.0)
+    axes[0].set_title(f"BP posterior | forced HIT at ({row}, {col})")
+    axes[0].scatter([col], [row], s=80, facecolors="none", edgecolors="cyan", linewidths=2)
+    fig.colorbar(im0, ax=axes[0], fraction=0.046)
+
+    im1 = axes[1].imshow(p_miss, cmap="coolwarm", vmin=0.0, vmax=1.0)
+    axes[1].set_title(f"BP posterior | forced MISS at ({row}, {col})")
+    axes[1].scatter([col], [row], s=80, facecolors="none", edgecolors="cyan", linewidths=2)
+    fig.colorbar(im1, ax=axes[1], fraction=0.046)
+
+    im2 = axes[2].imshow(delta, cmap="RdBu_r", vmin=-vlim, vmax=vlim)
+    axes[2].set_title("Delta (hit - miss)")
+    axes[2].scatter([col], [row], s=80, facecolors="none", edgecolors="black", linewidths=2)
+    fig.colorbar(im2, ax=axes[2], fraction=0.046)
+
+    fig.suptitle(f"Ising BP heatmaps | J={J:g}, bp_iters={bp_iters}", y=1.02)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -420,6 +481,13 @@ def parse_args() -> argparse.Namespace:
     surprise_parser.add_argument("--mcts-simulations", type=int, default=32)
     surprise_parser.add_argument("--mcts-rollout-depth", type=int, default=10)
 
+    bp_parser = subparsers.add_parser("bp-hit-miss")
+    bp_parser.add_argument("--row", type=int, default=4)
+    bp_parser.add_argument("--col", type=int, default=4)
+    bp_parser.add_argument("--bp-iters", type=int, default=60)
+    bp_parser.add_argument("--J", type=float, default=0.5)
+    bp_parser.add_argument("--output", default="plots/bp-hit-miss-delta.png")
+
     return parser.parse_args()
 
 
@@ -449,6 +517,17 @@ def main() -> None:
             mcts_rollout_depth=args.mcts_rollout_depth,
         )
         print(f"Saved temporal heatmaps to {Path(args.output).expanduser().resolve()}")
+        return
+
+    if args.command == "bp-hit-miss":
+        _plot_bp_hit_miss_delta(
+            output=Path(args.output).expanduser().resolve(),
+            row=args.row,
+            col=args.col,
+            bp_iters=args.bp_iters,
+            J=args.J,
+        )
+        print(f"Saved BP hit/miss/delta heatmaps to {Path(args.output).expanduser().resolve()}")
         return
 
     _plot_surprise_curves(

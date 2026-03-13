@@ -1,5 +1,4 @@
 # GNNforBattleship
-# OR
 ## Battleship via the Ising Model and Belief Propagation
 
 This project models the **targeting problem in Battleship** — deciding which cell to shoot next — as inference in an **Ising graphical model**, with **Belief Propagation (BP)** as the inference engine.
