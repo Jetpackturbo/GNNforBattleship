@@ -88,6 +88,7 @@ def _plot_benchmark_bars(results_json: Path, output: Path, title: str) -> None:
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.bar(
+        x,
         means,
         yerr=stds,
         capsize=5,
@@ -116,13 +117,14 @@ def _build_trajectory_agent(
     checkpoint: Path | None,
     mcts_simulations: int,
     mcts_rollout_depth: int,
+    ising_h_prior: float | None,
 ) -> object:
     if agent_name == "random":
         return RandomAgent()
     if agent_name == "probability_density":
         return ProbabilityDensityAgent()
     if agent_name == "ising_bp":
-        return IsingBPAgent()
+        return IsingBPAgent(h_prior=ising_h_prior)
     if agent_name == "mcts":
         return MCTSAgent(
             n_simulations=mcts_simulations,
@@ -177,6 +179,7 @@ def _plot_temporal_heatmaps(
     device: str,
     mcts_simulations: int,
     mcts_rollout_depth: int,
+    ising_h_prior: float | None,
 ) -> None:
     agent = _build_trajectory_agent(
         trajectory_agent_name,
@@ -184,6 +187,7 @@ def _plot_temporal_heatmaps(
         checkpoint=checkpoint,
         mcts_simulations=mcts_simulations,
         mcts_rollout_depth=mcts_rollout_depth,
+        ising_h_prior=ising_h_prior,
     )
     game = BattleshipGame(seed=board_seed)
     agent.reset()
@@ -466,6 +470,11 @@ def parse_args() -> argparse.Namespace:
     heatmap_parser.add_argument("--posterior-samples", type=int, default=64)
     heatmap_parser.add_argument("--mcts-simulations", type=int, default=64)
     heatmap_parser.add_argument("--mcts-rollout-depth", type=int, default=12)
+    heatmap_parser.add_argument(
+        "--ising-h-prior",
+        type=float,
+        help="Optional h_prior override for trajectory-agent ising_bp. Use 0 for a symmetric no-prior model.",
+    )
     heatmap_parser.add_argument("--output", default="plots/temporal-heatmaps.png")
 
     surprise_parser = subparsers.add_parser("surprise-curves")
@@ -515,6 +524,7 @@ def main() -> None:
             device=args.device,
             mcts_simulations=args.mcts_simulations,
             mcts_rollout_depth=args.mcts_rollout_depth,
+            ising_h_prior=args.ising_h_prior,
         )
         print(f"Saved temporal heatmaps to {Path(args.output).expanduser().resolve()}")
         return

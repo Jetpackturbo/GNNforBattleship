@@ -232,6 +232,24 @@ def _policy_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor
     return -(targets * log_probs).sum(dim=-1).mean()
 
 
+def _binary_entropy(p: np.ndarray) -> np.ndarray:
+    """Elementwise Bernoulli entropy H(p) in nats."""
+    eps = 1e-12
+    p_clip = np.clip(p, eps, 1.0 - eps)
+    return -(p_clip * np.log(p_clip) + (1.0 - p_clip) * np.log(1.0 - p_clip))
+
+
+def _posterior_entropy(posterior: np.ndarray, revealed: np.ndarray) -> float:
+    """Total posterior entropy of per-cell ship occupancy (sum of Bernoulli entropies).
+
+    This mirrors the definition used in the experiment suite: entropy is summed
+    over unrevealed cells only, because revealed cells are forced to 0/1.
+    """
+    h = _binary_entropy(posterior)
+    h = np.where(revealed, 0.0, h)
+    return float(np.sum(h))
+
+
 class GridMPNNLayer(nn.Module):
     """One message-passing sweep on the fixed Battleship grid."""
 
@@ -588,8 +606,14 @@ class ProbabilityDensityAgent:
 class IsingBPAgent:
     """Greedy Battleship agent using the Ising/BP posterior."""
 
-    def __init__(self, grid_size: int = GRID_SIZE, J: float = 0.5, bp_iters: int = 60) -> None:
-        self._model = BattleshipIsing(grid_size=grid_size, J=J)
+    def __init__(
+        self,
+        grid_size: int = GRID_SIZE,
+        J: float = 0.5,
+        bp_iters: int = 60,
+        h_prior: float | None = None,
+    ) -> None:
+        self._model = BattleshipIsing(grid_size=grid_size, J=J, h_prior=h_prior)
         self.bp_iters = bp_iters
 
     def reset(self) -> None:
@@ -616,7 +640,13 @@ def _generate_policy_sample(
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Generate one imitation-learning sample from the chosen teacher policy."""
+    """Generate one imitation-learning sample from the chosen teacher policy.
+
+    When ``teacher_policy == "ising_bp"``, we use the Battleship Ising model to
+    compute a posterior over ship occupancy and treat that as a scoring
+    function over cells, which is then converted into a masked policy
+    distribution over unrevealed cells.
+    """
     teacher_kwargs = {} if teacher_kwargs is None else dict(teacher_kwargs)
     while True:
         game_seed = int(rng.integers(0, 2**31))
@@ -690,6 +720,26 @@ def _generate_policy_sample(
                     planner.observe(int(row), int(col), True)
                 for row, col in observed_misses:
                     planner.observe(int(row), int(col), False)
+            elif teacher_policy == "ising_bp":
+                # Use the Ising/BP posterior as a teacher: build an Ising
+                # model consistent with the observed hits/misses, run BP, and
+                # treat the resulting occupancy probabilities as scores.
+                ising = BattleshipIsing(grid_size=GRID_SIZE, J=0.5)
+                for row, col in np.argwhere(selected_hit_mask):
+                    ising.observe(int(row), int(col), True)
+                for row, col in np.argwhere(selected_revealed & ~selected_hit_mask):
+                    ising.observe(int(row), int(col), False)
+                ising.run_bp(num_iter=60)
+                posterior = ising.beliefs()
+                # Convert posterior into a masked policy distribution.
+                policy = masked_policy_distribution(posterior, selected_revealed).astype(
+                    np.float32
+                ).flatten()
+                mask = (~selected_revealed).flatten().astype(bool)
+                feats = observation_masks_to_features(
+                    selected_hit_mask, selected_revealed
+                ).numpy()
+                return feats, policy, mask
             else:
                 raise ValueError(f"Unknown teacher_policy: {teacher_policy}")
 
@@ -759,6 +809,173 @@ def generate_dataset(
     if cache_path is not None and metadata is not None:
         print(f"Saving dataset cache to {cache_path}")
         _save_cached_dataset(cache_path, metadata, data)
+    return data
+
+
+def _expected_entropy_gain_map(
+    revealed: np.ndarray,
+    hit_mask: np.ndarray,
+    *,
+    posterior_samples: int = 16,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Approximate expected entropy gain IG(a) for every unrevealed cell a.
+
+    For the current state (revealed, hit_mask), we use the sampler-based
+    occupancy estimator to obtain a per-cell posterior p_0. For each candidate
+    action a, we approximate:
+
+        IG(a) = H(p_0) - E[ H(p_{t+1}) | action a ]
+
+    by assuming that the shot outcome is Bernoulli with parameter p_0[a], and
+    recomputing an occupancy posterior under the two hypothetical outcomes
+    (hit / miss). This is computationally heavier than a single trajectory
+    rollout but is done offline at dataset generation time.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    base_revealed = revealed.astype(bool, copy=True)
+    base_hits = hit_mask.astype(bool, copy=True)
+
+    posterior0 = estimate_posterior_occupancy(
+        base_revealed,
+        base_hits,
+        n_samples=posterior_samples,
+        rng=rng,
+    )
+    H0 = _posterior_entropy(posterior0, base_revealed)
+
+    N = base_revealed.shape[0]
+    ig_map = np.zeros_like(base_revealed, dtype=np.float64)
+
+    # Loop over all unrevealed cells and approximate their expected entropy gain.
+    for row in range(N):
+        for col in range(N):
+            if base_revealed[row, col]:
+                continue
+
+            p_hit = float(posterior0[row, col])
+            p_miss = 1.0 - p_hit
+
+            # Hypothetical hit outcome at (row, col).
+            hit_revealed = base_revealed.copy()
+            hit_hits = base_hits.copy()
+            hit_revealed[row, col] = True
+            hit_hits[row, col] = True
+            posterior_hit = estimate_posterior_occupancy(
+                hit_revealed,
+                hit_hits,
+                n_samples=posterior_samples,
+                rng=rng,
+            )
+            H_hit = _posterior_entropy(posterior_hit, hit_revealed)
+
+            # Hypothetical miss outcome at (row, col).
+            miss_revealed = base_revealed.copy()
+            miss_hits = base_hits.copy()
+            miss_revealed[row, col] = True
+            # hit mask unchanged for a miss
+            posterior_miss = estimate_posterior_occupancy(
+                miss_revealed,
+                miss_hits,
+                n_samples=posterior_samples,
+                rng=rng,
+            )
+            H_miss = _posterior_entropy(posterior_miss, miss_revealed)
+
+            expected_H = p_hit * H_hit + p_miss * H_miss
+            ig_map[row, col] = max(H0 - expected_H, 0.0)
+
+    return ig_map
+
+
+def _generate_entropy_gain_sample(
+    rng: np.random.Generator,
+    max_context_shots: int = 40,
+    posterior_samples: int = 16,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate one training sample using expected entropy-gain supervision.
+
+    We first roll out a ProbabilityDensityAgent trajectory to obtain a
+    realistic partial board state (revealed, hit_mask). At that state we
+    compute, for every unrevealed cell, the approximate expected entropy gain
+    IG(a) using `_expected_entropy_gain_map`. These IG values are turned into
+    a masked target policy over actions.
+    """
+    while True:
+        game_seed = int(rng.integers(0, 2**31))
+        game = BattleshipGame(grid_size=GRID_SIZE, seed=game_seed)
+        traj_agent = ProbabilityDensityAgent(grid_size=GRID_SIZE, seed=game_seed)
+
+        n_steps = int(rng.integers(0, max_context_shots + 1))
+        for _ in range(n_steps):
+            row, col = traj_agent.best_guess()
+            is_hit = game.shoot(row, col)
+            traj_agent.observe(row, col, is_hit)
+            if game.all_sunk(traj_agent.hit_mask):
+                break
+
+        revealed = traj_agent.revealed.copy()
+        hit_mask = traj_agent.hit_mask.copy()
+
+        if np.all(revealed):
+            # No unknown cells left; resample a state.
+            continue
+
+        ig_map = _expected_entropy_gain_map(
+            revealed,
+            hit_mask,
+            posterior_samples=posterior_samples,
+            rng=np.random.default_rng(game_seed + 5000),
+        )
+        # Restrict to unrevealed cells and normalise into a policy.
+        ig_flat = ig_map.flatten().astype(np.float64)
+        mask = (~revealed).flatten().astype(bool)
+        if not np.any(mask):
+            continue
+
+        ig_masked = ig_flat[mask]
+        # If all IG values are zero (numerically), fall back to uniform.
+        if not np.any(ig_masked > 0.0):
+            target = np.zeros_like(ig_flat, dtype=np.float32)
+            target[mask] = 1.0 / float(mask.sum())
+        else:
+            shifted = ig_masked - ig_masked.max()
+            weights = np.exp(shifted)
+            weights /= weights.sum()
+            target = np.zeros_like(ig_flat, dtype=np.float32)
+            target[mask] = weights.astype(np.float32)
+
+        feats = observation_masks_to_features(hit_mask, revealed).numpy()
+        return feats, target, mask
+
+
+def generate_entropy_gain_dataset(
+    n_samples: int = 2000,
+    max_context_shots: int = 40,
+    posterior_samples: int = 16,
+    seed: int = 0,
+    show_progress: bool = True,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Generate `(features, target_policy, unknown_mask)` using entropy-gain labels."""
+    rng = np.random.default_rng(seed)
+    data: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    iterator = _maybe_tqdm(
+        range(n_samples),
+        show_progress,
+        total=n_samples,
+        desc="Generating entropy-gain states",
+        leave=False,
+    )
+    for _ in iterator:
+        data.append(
+            _generate_entropy_gain_sample(
+                rng,
+                max_context_shots=max_context_shots,
+                posterior_samples=posterior_samples,
+            )
+        )
     return data
 
 
@@ -890,6 +1107,171 @@ def train_gnn(
 
     print(
         f"Training policy GNN ({n_train} train / {n_val} val / {n_epochs} epochs) ..."
+    )
+    epoch_iterator = _maybe_tqdm(
+        range(1, n_epochs + 1),
+        show_progress,
+        total=n_epochs,
+        desc="Epochs",
+    )
+    for epoch in epoch_iterator:
+        train_loss, train_top1 = _run_epoch(train_data, train=True)
+        val_loss, val_top1 = _run_epoch(val_data, train=False)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_top1"].append(train_top1)
+        history["val_top1"].append(val_top1)
+        _wandb_log(
+            wandb_run,
+            {
+                "epoch": float(epoch),
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_top1": train_top1,
+                "val_top1": val_top1,
+            },
+            step=epoch,
+        )
+
+        if hasattr(epoch_iterator, "set_postfix"):
+            epoch_iterator.set_postfix(val_loss=f"{val_loss:.4f}", val_top1=f"{val_top1:.3f}")
+
+        if (not show_progress) and (epoch % 5 == 0 or epoch == 1):
+            print(
+                f"  Epoch {epoch:3d}/{n_epochs}  "
+                f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+                f"val_top1={val_top1:.3f}"
+            )
+
+    return model, dict(history)
+
+
+def train_gnn_entropy_gain(
+    n_epochs: int = 20,
+    n_train: int = 2000,
+    n_val: int = 500,
+    hidden_dim: int = 64,
+    num_layers: int = 6,
+    lr: float = 3e-4,
+    batch_size: int = 64,
+    max_context_shots: int = 40,
+    posterior_samples: int = 16,
+    seed: int = 0,
+    device: str = "cpu",
+    use_pyg: bool = False,
+    show_progress: bool = True,
+    wandb_run: Any = None,
+    init_model: Optional["BattleshipGNN"] = None,
+) -> tuple["BattleshipGNN", dict]:
+    """Train the GNN to maximise expected entropy gain per shot.
+
+    Instead of imitating a teacher policy, this objective builds training
+    targets from an approximate expected entropy-gain map over actions. For
+    each sampled partial game state, we:
+
+      * Estimate a per-cell occupancy posterior using `estimate_posterior_occupancy`.
+      * For every unrevealed cell, approximate the expected posterior entropy
+        after shooting that cell (under hit / miss outcomes).
+      * Use the resulting IG(a) = H(p_0) - E[H(p_{t+1}) | a] values to define
+        a masked soft target policy over actions.
+    """
+    print("Generating entropy-gain training data ...")
+    train_data = generate_entropy_gain_dataset(
+        n_samples=n_train,
+        max_context_shots=max_context_shots,
+        posterior_samples=posterior_samples,
+        seed=seed,
+        show_progress=show_progress,
+    )
+    val_data = generate_entropy_gain_dataset(
+        n_samples=n_val,
+        max_context_shots=max_context_shots,
+        posterior_samples=posterior_samples,
+        seed=seed + 1,
+        show_progress=show_progress,
+    )
+
+    if init_model is not None:
+        model = init_model.to(device)
+    else:
+        model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = defaultdict(list)
+
+    def _run_epoch(dataset, train: bool) -> tuple[float, float]:
+        model.train(train)
+        rng = np.random.default_rng(seed + (0 if train else 9999))
+        indices = np.arange(len(dataset))
+        if train:
+            rng.shuffle(indices)
+
+        total_loss = 0.0
+        total_acc = 0.0
+        total_batches = 0
+
+        iterator = _maybe_tqdm(
+            range(0, len(dataset), batch_size),
+            show_progress,
+            total=(len(dataset) + batch_size - 1) // batch_size,
+            desc="Train batches" if train else "Val batches",
+            leave=False,
+        )
+        for start in iterator:
+            batch_idx = indices[start : start + batch_size]
+            if train:
+                optimizer.zero_grad()
+
+            if model.use_pyg:
+                losses = []
+                batch_correct = 0.0
+                for i in batch_idx:
+                    feats, target, mask = dataset[i]
+                    x_t = torch.tensor(feats, dtype=torch.float32, device=device)
+                    y_t = torch.tensor(target, dtype=torch.float32, device=device)
+                    m_t = torch.tensor(mask, dtype=torch.bool, device=device)
+                    logits = model(x_t)
+                    loss_i = _policy_loss(logits.unsqueeze(0), y_t.unsqueeze(0), m_t.unsqueeze(0))
+                    losses.append(loss_i)
+
+                    pred_idx = int(logits.masked_fill(~m_t, -1e9).argmax().item())
+                    target_idx = int(y_t.argmax().item())
+                    batch_correct += float(pred_idx == target_idx)
+
+                loss = torch.stack(losses).mean()
+                batch_acc = batch_correct / max(len(batch_idx), 1)
+            else:
+                feats, targets, masks = [], [], []
+                for i in batch_idx:
+                    f, t, m = dataset[i]
+                    feats.append(f)
+                    targets.append(t)
+                    masks.append(m)
+
+                x_t = torch.tensor(np.stack(feats), dtype=torch.float32, device=device)
+                y_t = torch.tensor(np.stack(targets), dtype=torch.float32, device=device)
+                m_t = torch.tensor(np.stack(masks), dtype=torch.bool, device=device)
+
+                logits = model(x_t)
+                loss = _policy_loss(logits, y_t, m_t)
+
+                pred_idx = logits.masked_fill(~m_t, -1e9).argmax(dim=-1)
+                target_idx = y_t.argmax(dim=-1)
+                batch_acc = float((pred_idx == target_idx).float().mean().item())
+
+            if train:
+                loss.backward()
+                optimizer.step()
+
+            total_loss += float(loss.item())
+            total_acc += batch_acc
+            total_batches += 1
+
+        denom = max(total_batches, 1)
+        return total_loss / denom, total_acc / denom
+
+    print(
+        f"Training entropy-gain GNN ({n_train} train / {n_val} val / {n_epochs} epochs) ..."
     )
     epoch_iterator = _maybe_tqdm(
         range(1, n_epochs + 1),

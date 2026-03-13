@@ -99,6 +99,38 @@ run_train "GNN-ATTN on PDF Teacher" \
   --teacher-policy probability_density \
   # --no-tqdm
 
+# New: GNN and GNN-ATTN trained to imitate the Ising/BP posterior directly.
+run_train "GNN on Ising/BP Teacher" \
+  --model gnn \
+  --output "$CHECKPOINT_DIR/gnn_ising_teacher.pt" \
+  --device "$DEVICE" \
+  --epochs "$PDF_EPOCHS" \
+  --n-train "$PDF_N_TRAIN" \
+  --n-val "$PDF_N_VAL" \
+  --batch-size "$BATCH_SIZE" \
+  --hidden-dim "$HIDDEN_DIM" \
+  --num-layers "$NUM_LAYERS" \
+  --lr "$LR" \
+  --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --teacher-policy ising_bp \
+  # --no-tqdm
+
+run_train "GNN-ATTN on Ising/BP Teacher" \
+  --model attn \
+  --output "$CHECKPOINT_DIR/attn_ising_teacher.pt" \
+  --device "$DEVICE" \
+  --epochs "$PDF_EPOCHS" \
+  --n-train "$PDF_N_TRAIN" \
+  --n-val "$PDF_N_VAL" \
+  --batch-size "$BATCH_SIZE" \
+  --hidden-dim "$HIDDEN_DIM" \
+  --num-layers "$NUM_LAYERS" \
+  --num-heads "$NUM_HEADS" \
+  --lr "$LR" \
+  --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --teacher-policy ising_bp \
+  # --no-tqdm
+
 run_train "GNN finetuned with MCTS" \
   --model gnn \
   --output "$CHECKPOINT_DIR/gnn_mcts_finetune.pt" \

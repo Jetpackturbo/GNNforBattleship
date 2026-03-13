@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-context-shots", type=int, default=40)
     parser.add_argument(
         "--teacher-policy",
-        choices=["probability_density", "mcts"],
+        choices=["probability_density", "mcts", "ising_bp"],
         default="probability_density",
     )
     parser.add_argument(
