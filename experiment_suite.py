@@ -26,7 +26,6 @@ from battleship_ising import BattleshipGame
 from gnn import (
     BattleshipGNN,
     GNNAgent,
-    HuntTargetAgent,
     IsingBPAgent,
     ProbabilityDensityAgent,
     RandomAgent,
@@ -80,6 +79,21 @@ def _slugify(label: str) -> str:
 
 def _grouped(items: list[str], size: int) -> list[list[str]]:
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
+
+
+def _binary_entropy(p: np.ndarray) -> np.ndarray:
+    """Elementwise Bernoulli entropy H(p) in nats."""
+    eps = 1e-12
+    p_clip = np.clip(p, eps, 1.0 - eps)
+    return -(p_clip * np.log(p_clip) + (1.0 - p_clip) * np.log(1.0 - p_clip))
+
+
+def _posterior_entropy(posterior: np.ndarray, revealed: np.ndarray) -> float:
+    """Total posterior entropy of per-cell ship occupancy (sum of Bernoulli entropies)."""
+    # Posterior is forced to 0/1 on revealed cells; masking avoids tiny numeric noise.
+    h = _binary_entropy(posterior)
+    h = np.where(revealed, 0.0, h)
+    return float(np.sum(h))
 
 
 def _policy_prior_fn(model: object, device: str) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
@@ -185,42 +199,17 @@ def _plot_benchmark_groups(
     outputs: list[Path] = []
     for group_idx, labels in enumerate(_grouped(ordered_labels, group_size), start=1):
         means = np.array([summary[label]["mean"] for label in labels], dtype=float)
-        medians = np.array([summary[label]["median"] for label in labels], dtype=float)
-        mean_err = np.array(
-            [
-                [summary[label]["mean_err_low"] for label in labels],
-                [summary[label]["mean_err_high"] for label in labels],
-            ],
-            dtype=float,
-        )
-        median_err = np.array(
-            [
-                [summary[label]["median_err_low"] for label in labels],
-                [summary[label]["median_err_high"] for label in labels],
-            ],
-            dtype=float,
-        )
+        stds = np.array([summary[label]["std"] for label in labels], dtype=float)
         x = np.arange(len(labels))
-        width = 0.38
 
         fig, ax = plt.subplots(figsize=(12, 6))
         ax.bar(
-            x - width / 2,
+            x,
             means,
-            width=width,
-            yerr=mean_err,
+            yerr=stds,
             capsize=5,
-            label="Mean shots",
+            label="Mean shots (±1 std)",
             color="#4C78A8",
-        )
-        ax.bar(
-            x + width / 2,
-            medians,
-            width=width,
-            yerr=median_err,
-            capsize=5,
-            label="Median shots",
-            color="#F58518",
         )
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=18, ha="right")
@@ -243,8 +232,9 @@ def _run_surprise_trajectories(
     seed: int,
     max_steps: int,
     posterior_samples: int,
-) -> dict[str, list[list[float]]]:
+) -> tuple[dict[str, list[list[float]]], dict[str, list[list[float]]]]:
     surprise_by_agent: dict[str, list[list[float]]] = {spec.label: [] for spec in agent_specs}
+    entropy_by_agent: dict[str, list[list[float]]] = {spec.label: [] for spec in agent_specs}
     for game_idx in range(n_games):
         board_seed = seed + game_idx
         base_revealed = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
@@ -266,6 +256,7 @@ def _run_surprise_trajectories(
             true_hits = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
             prev_posterior = initial_posterior.copy()
             trajectory: list[float] = []
+            entropies: list[float] = [_posterior_entropy(prev_posterior, revealed)]
 
             for _ in range(max_steps):
                 row, col = agent.best_guess()
@@ -284,14 +275,16 @@ def _run_surprise_trajectories(
                 )
                 surprise_value, _ = bayesian_surprise(prev_posterior, current_posterior)
                 trajectory.append(float(surprise_value))
+                entropies.append(_posterior_entropy(current_posterior, revealed))
                 prev_posterior = current_posterior
 
                 if game.all_sunk(true_hits):
                     break
 
             surprise_by_agent[spec.label].append(trajectory)
+            entropy_by_agent[spec.label].append(entropies)
         print(f"Surprise curves: completed {game_idx + 1}/{n_games} boards")
-    return surprise_by_agent
+    return surprise_by_agent, entropy_by_agent
 
 
 def _plot_surprise_groups(
@@ -329,6 +322,90 @@ def _plot_surprise_groups(
         plt.tight_layout()
 
         out_path = output_dir / f"surprise_group_{group_idx}.png"
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        outputs.append(out_path)
+    return outputs
+
+
+def _plot_entropy_groups(
+    entropy_by_agent: dict[str, list[list[float]]],
+    ordered_labels: list[str],
+    output_dir: Path,
+    max_steps: int,
+    group_size: int = 6,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    # Entropy trajectories include step 0, so plot steps 0..max_steps.
+    steps = np.arange(0, max_steps + 1)
+    for group_idx, labels in enumerate(_grouped(ordered_labels, group_size), start=1):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        colors = plt.cm.Set2(np.linspace(0, 1, len(labels)))
+
+        for color, label in zip(colors, labels):
+            trajectories = entropy_by_agent[label]
+            values = np.full((len(trajectories), max_steps + 1), np.nan, dtype=float)
+            for idx, trajectory in enumerate(trajectories):
+                limit = min(len(trajectory), max_steps + 1)
+                values[idx, :limit] = trajectory[:limit]
+            mean_curve = np.nanmean(values, axis=0)
+            counts = np.sum(~np.isnan(values), axis=0)
+            sem = np.nanstd(values, axis=0) / np.sqrt(np.maximum(counts, 1))
+            ci = 1.96 * sem
+            ax.plot(steps, mean_curve, color=color, linewidth=2, label=label)
+            ax.fill_between(steps, mean_curve - ci, mean_curve + ci, color=color, alpha=0.2)
+
+        ax.set_xlabel("Time step")
+        ax.set_ylabel("Posterior entropy (nats, summed over cells)")
+        ax.set_title(f"Estimated-boat posterior entropy over time, group {group_idx}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+
+        out_path = output_dir / f"entropy_group_{group_idx}.png"
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        outputs.append(out_path)
+    return outputs
+
+
+def _plot_cumulative_surprise_groups(
+    surprise_by_agent: dict[str, list[list[float]]],
+    ordered_labels: list[str],
+    output_dir: Path,
+    max_steps: int,
+    group_size: int = 6,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    steps = np.arange(1, max_steps + 1)
+    for group_idx, labels in enumerate(_grouped(ordered_labels, group_size), start=1):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        colors = plt.cm.Set2(np.linspace(0, 1, len(labels)))
+
+        for color, label in zip(colors, labels):
+            trajectories = surprise_by_agent[label]
+            values = np.full((len(trajectories), max_steps), np.nan, dtype=float)
+            for idx, trajectory in enumerate(trajectories):
+                limit = min(len(trajectory), max_steps)
+                if limit:
+                    values[idx, :limit] = np.cumsum(np.asarray(trajectory[:limit], dtype=float))
+            mean_curve = np.nanmean(values, axis=0)
+            counts = np.sum(~np.isnan(values), axis=0)
+            sem = np.nanstd(values, axis=0) / np.sqrt(np.maximum(counts, 1))
+            ci = 1.96 * sem
+            ax.plot(steps, mean_curve, color=color, linewidth=2, label=label)
+            ax.fill_between(steps, mean_curve - ci, mean_curve + ci, color=color, alpha=0.2)
+
+        ax.set_xlabel("Time step")
+        ax.set_ylabel("Cumulative Bayesian surprise (reward)")
+        ax.set_title(f"Cumulative Bayesian-surprise reward over first {max_steps} steps, group {group_idx}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+
+        out_path = output_dir / f"cumulative_surprise_group_{group_idx}.png"
         fig.savefig(out_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
         outputs.append(out_path)
@@ -457,10 +534,10 @@ def main() -> None:
     learned_specs = [
         ("GNN on PDF Teacher", Path(args.gnn_pdf).expanduser().resolve()),
         ("GNN-ATTN on PDF Teacher", Path(args.attn_pdf).expanduser().resolve()),
-        ("GNN on MCTS Teacher", Path(args.gnn_mcts).expanduser().resolve()),
-        ("GNN-ATTN on MCTS Teacher", Path(args.attn_mcts).expanduser().resolve()),
-        ("GNN on MCTS Teacher with UCT", Path(args.gnn_mcts_uct).expanduser().resolve()),
-        ("GNN-ATTN on MCTS Teacher with UCT", Path(args.attn_mcts_uct).expanduser().resolve()),
+        ("GNN finetuned with MCTS", Path(args.gnn_mcts).expanduser().resolve()),
+        ("GNN-ATTN finetuned with MCTS", Path(args.attn_mcts).expanduser().resolve()),
+        ("GNN finetuned with MCTS (UCT)", Path(args.gnn_mcts_uct).expanduser().resolve()),
+        ("GNN-ATTN finetuned with MCTS (UCT)", Path(args.attn_mcts_uct).expanduser().resolve()),
     ]
 
     guided_mcts_checkpoint = (
@@ -468,7 +545,7 @@ def main() -> None:
         if args.guided_mcts_checkpoint is not None
         else Path(args.attn_mcts).expanduser().resolve()
     )
-    guided_mcts_label = "MCTS with teacher"
+    guided_mcts_label = "MCTS with neural prior"
 
     agent_specs = _benchmark_specs(
         learned_specs=learned_specs,
@@ -498,7 +575,7 @@ def main() -> None:
         group_size=6,
     )
 
-    surprise_data = _run_surprise_trajectories(
+    surprise_data, entropy_data = _run_surprise_trajectories(
         agent_specs=agent_specs,
         n_games=args.surprise_games,
         seed=400,
@@ -514,6 +591,17 @@ def main() -> None:
             "surprise_by_agent": surprise_data,
         },
     )
+    _save_json(
+        results_dir / "entropy_results.json",
+        {
+            "n_games": args.surprise_games,
+            "max_steps": args.surprise_steps,
+            "ordered_labels": ordered_labels,
+            "entropy_by_agent": entropy_data,
+            "entropy_definition": "sum over cells of Bernoulli entropy of posterior ship occupancy, masked to unrevealed cells",
+            "units": "nats",
+        },
+    )
     surprise_plot_paths = _plot_surprise_groups(
         surprise_data,
         ordered_labels,
@@ -521,16 +609,30 @@ def main() -> None:
         max_steps=args.surprise_steps,
         group_size=6,
     )
+    cumulative_surprise_plot_paths = _plot_cumulative_surprise_groups(
+        surprise_data,
+        ordered_labels,
+        plots_dir / "cumulative_surprise",
+        max_steps=args.surprise_steps,
+        group_size=6,
+    )
+    entropy_plot_paths = _plot_entropy_groups(
+        entropy_data,
+        ordered_labels,
+        plots_dir / "entropy",
+        max_steps=args.surprise_steps,
+        group_size=6,
+    )
 
     gif_labels = [
         "GNN on PDF Teacher",
         "GNN-ATTN on PDF Teacher",
-        "GNN on MCTS Teacher",
-        "GNN-ATTN on MCTS Teacher",
-        "GNN on MCTS Teacher with UCT",
-        "GNN-ATTN on MCTS Teacher with UCT",
+        "GNN finetuned with MCTS",
+        "GNN-ATTN finetuned with MCTS",
+        "GNN finetuned with MCTS (UCT)",
+        "GNN-ATTN finetuned with MCTS (UCT)",
         "MCTS solution",
-        "MCTS with teacher",
+        "MCTS with neural prior",
     ]
     gif_paths: dict[str, str] = {}
     for spec in agent_specs:
@@ -552,6 +654,8 @@ def main() -> None:
         {
             "benchmark_plots": [str(path) for path in benchmark_plot_paths],
             "surprise_plots": [str(path) for path in surprise_plot_paths],
+            "cumulative_surprise_plots": [str(path) for path in cumulative_surprise_plot_paths],
+            "entropy_plots": [str(path) for path in entropy_plot_paths],
             "gifs": gif_paths,
         },
     )

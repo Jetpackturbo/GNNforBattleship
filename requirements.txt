@@ -1,14 +1,14 @@
 # Core numerical and plotting dependencies
-numpy
-matplotlib
+numpy==1.26.4
+matplotlib==3.10.7
 
-# Deep learning
-torch
+# Deep learning (tested with Python 3.10/3.11)
+torch==2.9.1
 
 # Experiment tracking and progress bars
-wandb
-tqdm
+wandb==0.23.0
+tqdm==4.67.1
 
 # Optional: enables the PyG-backed message-passing path in gnn.py
 # The repository works without this package by using the pure PyTorch fallback.
-torch-geometric
+torch-geometric==2.7.0

@@ -782,6 +782,7 @@ def train_gnn(
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
     dataset_cache_dir: Optional[str | Path] = None,
+    init_model: Optional["BattleshipGNN"] = None,
 ) -> tuple["BattleshipGNN", dict]:
     """Train the move-selection GNN by imitating the chosen teacher policy."""
     print("Generating policy-training data ...")
@@ -809,8 +810,10 @@ def train_gnn(
         surprise_alpha=surprise_alpha,
         cache_dir=dataset_cache_dir,
     )
-
-    model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)
+    if init_model is not None:
+        model = init_model.to(device)
+    else:
+        model = BattleshipGNN(hidden_dim=hidden_dim, num_layers=num_layers, use_pyg=use_pyg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     history = defaultdict(list)
 
@@ -1050,7 +1053,6 @@ def compare_all_agents(
     """Run the DataGenetics-style benchmark suite on shared game instances."""
     agents: dict[str, object] = {
         "Random": RandomAgent(seed=seed),
-        "Hunt Target": HuntTargetAgent(seed=seed),
         "Probability Density": ProbabilityDensityAgent(seed=seed),
         "Ising BP": IsingBPAgent(),
     }

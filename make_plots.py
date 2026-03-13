@@ -20,7 +20,6 @@ from gnn import (
     BattleshipGNN,
     GNNAgent,
     GRID_SIZE,
-    HuntTargetAgent,
     IsingBPAgent,
     ProbabilityDensityAgent,
     RandomAgent,
@@ -76,47 +75,20 @@ def _load_results_payload(path: Path) -> tuple[dict[str, list[int]], dict[str, d
 
 def _plot_benchmark_bars(results_json: Path, output: Path, title: str) -> None:
     _, summary = _load_results_payload(results_json)
-    names = list(summary.keys())
+    # Optionally filter out legacy baselines that should not appear in new plots.
+    names = [name for name in summary.keys() if name != "Hunt Target"]
     means = np.array([summary[name]["mean"] for name in names], dtype=float)
-    medians = np.array([summary[name]["median"] for name in names], dtype=float)
-    mean_err = np.array(
-        [
-            [summary[name]["mean_err_low"] for name in names],
-            [summary[name]["mean_err_high"] for name in names],
-        ],
-        dtype=float,
-    )
-    median_err = np.array(
-        [
-            [summary[name]["median_err_low"] for name in names],
-            [summary[name]["median_err_high"] for name in names],
-        ],
-        dtype=float,
-    )
+    stds = np.array([summary[name]["std"] for name in names], dtype=float)
 
     x = np.arange(len(names))
-    width = 0.38
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.bar(
-        x - width / 2,
         means,
-        width=width,
-        yerr=mean_err,
+        yerr=stds,
         capsize=5,
-        label="Mean shots",
+        label="Mean shots (±1 std)",
         color="#5DA5DA",
-        edgecolor="black",
-        linewidth=0.7,
-    )
-    ax.bar(
-        x + width / 2,
-        medians,
-        width=width,
-        yerr=median_err,
-        capsize=5,
-        label="Median shots",
-        color="#F17CB0",
         edgecolor="black",
         linewidth=0.7,
     )
@@ -143,8 +115,6 @@ def _build_trajectory_agent(
 ) -> object:
     if agent_name == "random":
         return RandomAgent()
-    if agent_name == "hunt_target":
-        return HuntTargetAgent()
     if agent_name == "probability_density":
         return ProbabilityDensityAgent()
     if agent_name == "ising_bp":
@@ -258,9 +228,15 @@ def _plot_temporal_heatmaps(
         _overlay_observations(ax, snapshot_revealed, snapshot_hits)
         fig.colorbar(im, ax=ax, fraction=0.046)
 
+    model_label = None
+    if checkpoint is not None and trajectory_agent_name in {"gnn", "attn"}:
+        model_label = checkpoint.stem
+
     fig.suptitle(
         f"Estimated boat probability every {interval} steps\n"
-        f"trajectory={trajectory_agent_name}, board_seed={board_seed}, posterior_samples={posterior_samples}",
+        f"trajectory={trajectory_agent_name}"
+        + ("" if model_label is None else f", model={model_label}")
+        + f", board_seed={board_seed}, posterior_samples={posterior_samples}",
         y=0.98,
     )
 
@@ -280,7 +256,6 @@ def _build_agent_factories(
 ) -> dict[str, callable]:
     factories: dict[str, callable] = {
         "Random": lambda: RandomAgent(),
-        "Hunt Target": lambda: HuntTargetAgent(),
         "Probability Density": lambda: ProbabilityDensityAgent(),
         "Ising BP": lambda: IsingBPAgent(),
     }
@@ -419,7 +394,7 @@ def parse_args() -> argparse.Namespace:
     heatmap_parser = subparsers.add_parser("heatmaps")
     heatmap_parser.add_argument(
         "--trajectory-agent",
-        choices=["random", "hunt_target", "probability_density", "ising_bp", "mcts", "gnn", "attn"],
+        choices=["random", "probability_density", "ising_bp", "mcts", "gnn", "attn"],
         default="probability_density",
     )
     heatmap_parser.add_argument("--checkpoint")

@@ -17,15 +17,15 @@ POSTERIOR_SAMPLES="${POSTERIOR_SAMPLES:-16}"
 GIF_STEPS="${GIF_STEPS:-50}"
 GIF_BOARD_SEED="${GIF_BOARD_SEED:-42}"
 
-GUIDED_MCTS_CHECKPOINT="${GUIDED_MCTS_CHECKPOINT:-$CHECKPOINT_DIR/attn_mcts_teacher.pt}"
+GUIDED_MCTS_CHECKPOINT="${GUIDED_MCTS_CHECKPOINT:-$CHECKPOINT_DIR/attn_mcts_finetune.pt}"
 
 required_checkpoints=(
   "$CHECKPOINT_DIR/gnn_pdf_teacher.pt"
   "$CHECKPOINT_DIR/attn_pdf_teacher.pt"
-  "$CHECKPOINT_DIR/gnn_mcts_teacher.pt"
-  "$CHECKPOINT_DIR/attn_mcts_teacher.pt"
-  "$CHECKPOINT_DIR/gnn_mcts_teacher_uct.pt"
-  "$CHECKPOINT_DIR/attn_mcts_teacher_uct.pt"
+  "$CHECKPOINT_DIR/gnn_mcts_finetune.pt"
+  "$CHECKPOINT_DIR/attn_mcts_finetune.pt"
+  "$CHECKPOINT_DIR/gnn_mcts_finetune_uct.pt"
+  "$CHECKPOINT_DIR/attn_mcts_finetune_uct.pt"
 )
 
 for checkpoint in "${required_checkpoints[@]}"; do
@@ -51,10 +51,10 @@ python experiment_suite.py \
   --gifs-dir "$GIFS_DIR" \
   --gnn-pdf "$CHECKPOINT_DIR/gnn_pdf_teacher.pt" \
   --attn-pdf "$CHECKPOINT_DIR/attn_pdf_teacher.pt" \
-  --gnn-mcts "$CHECKPOINT_DIR/gnn_mcts_teacher.pt" \
-  --attn-mcts "$CHECKPOINT_DIR/attn_mcts_teacher.pt" \
-  --gnn-mcts-uct "$CHECKPOINT_DIR/gnn_mcts_teacher_uct.pt" \
-  --attn-mcts-uct "$CHECKPOINT_DIR/attn_mcts_teacher_uct.pt" \
+  --gnn-mcts "$CHECKPOINT_DIR/gnn_mcts_finetune.pt" \
+  --attn-mcts "$CHECKPOINT_DIR/attn_mcts_finetune.pt" \
+  --gnn-mcts-uct "$CHECKPOINT_DIR/gnn_mcts_finetune_uct.pt" \
+  --attn-mcts-uct "$CHECKPOINT_DIR/attn_mcts_finetune_uct.pt" \
   --guided-mcts-checkpoint "$GUIDED_MCTS_CHECKPOINT"
 
 echo

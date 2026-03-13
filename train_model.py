@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from gnn import GRID_SIZE, SHIP_LENGTHS, benchmark_reference, train_gnn
+from gnn import GRID_SIZE, SHIP_LENGTHS, BattleshipGNN, benchmark_reference, train_gnn
 
 
 ROOT = Path(__file__).resolve().parent
@@ -194,6 +194,10 @@ def parse_args() -> argparse.Namespace:
         choices=["online", "offline", "disabled"],
         default="online",
     )
+    parser.add_argument(
+        "--init-from",
+        help="Optional checkpoint to initialize from (for MCTS finetuning).",
+    )
     return parser.parse_args()
 
 
@@ -226,6 +230,26 @@ def main() -> None:
             "leaf_samples": args.teacher_mcts_leaf_samples,
         }
 
+    init_model = None
+    if args.init_from:
+        init_path = Path(args.init_from).expanduser().resolve()
+        checkpoint: dict = torch.load(init_path, map_location=args.device)
+        ckpt_type = checkpoint.get("model_type")
+        ckpt_kwargs = checkpoint.get("model_kwargs", {})
+        if ckpt_type != args.model:
+            raise ValueError(
+                f"--init-from checkpoint has model_type={ckpt_type!r}, "
+                f"but --model={args.model!r} was requested."
+            )
+        if ckpt_type == "gnn":
+            init_model = BattleshipGNN(**ckpt_kwargs)
+        elif ckpt_type == "attn":
+            attn_module = _load_attention_module()
+            init_model = attn_module.BattleshipAttentionGNN(**ckpt_kwargs)
+        else:
+            raise ValueError(f"Unsupported checkpoint model type in --init-from: {ckpt_type!r}")
+        init_model.load_state_dict(checkpoint["state_dict"])
+
     config = {
         "model": args.model,
         "output": str(output_path),
@@ -253,6 +277,7 @@ def main() -> None:
         "surprise_samples": args.surprise_samples,
         "surprise_alpha": args.surprise_alpha,
         "dataset_cache_dir": None if args.no_dataset_cache else args.dataset_cache_dir,
+        "init_from": None if not args.init_from else str(Path(args.init_from).expanduser().resolve()),
     }
     wandb_run = _init_wandb_run(args, config)
 
@@ -273,6 +298,7 @@ def main() -> None:
                 surprise_samples=args.surprise_samples,
                 surprise_alpha=args.surprise_alpha,
                 dataset_cache_dir=None if args.no_dataset_cache else args.dataset_cache_dir,
+                init_model=init_model if args.model == "gnn" else None,
                 **common_train_kwargs,
             )
         else:
@@ -292,6 +318,7 @@ def main() -> None:
                 surprise_samples=args.surprise_samples,
                 surprise_alpha=args.surprise_alpha,
                 dataset_cache_dir=None if args.no_dataset_cache else args.dataset_cache_dir,
+                init_model=init_model if args.model == "attn" else None,
                 **common_train_kwargs,
             )
 
@@ -307,6 +334,7 @@ def main() -> None:
             "dataset_cache_dir": None if args.no_dataset_cache else args.dataset_cache_dir,
             "history": history,
             "state_dict": model.state_dict(),
+            "init_from": None if not args.init_from else str(Path(args.init_from).expanduser().resolve()),
         }
         torch.save(checkpoint, output_path)
 

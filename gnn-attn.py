@@ -245,6 +245,7 @@ def train_attention_gnn(
     surprise_samples: int = 8,
     surprise_alpha: float = 1.0,
     dataset_cache_dir: Optional[str] = None,
+    init_model: Optional["BattleshipAttentionGNN"] = None,
 ) -> tuple["BattleshipAttentionGNN", dict]:
     """Train the attention-based policy network against the same teacher."""
     print("Generating policy-training data for attention GNN ...")
@@ -272,12 +273,14 @@ def train_attention_gnn(
         surprise_alpha=surprise_alpha,
         cache_dir=dataset_cache_dir,
     )
-
-    model = BattleshipAttentionGNN(
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-    ).to(device)
+    if init_model is not None:
+        model = init_model.to(device)
+    else:
+        model = BattleshipAttentionGNN(
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+        ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     history = defaultdict(list)
 

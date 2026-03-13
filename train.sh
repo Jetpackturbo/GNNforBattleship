@@ -72,9 +72,9 @@ run_train "GNN-ATTN on PDF Teacher" \
   --teacher-policy probability_density \
   # --no-tqdm
 
-run_train "GNN on MCTS Teacher" \
+run_train "GNN finetuned with MCTS" \
   --model gnn \
-  --output "$CHECKPOINT_DIR/gnn_mcts_teacher.pt" \
+  --output "$CHECKPOINT_DIR/gnn_mcts_finetune.pt" \
   --device "$DEVICE" \
   --epochs "$MCTS_EPOCHS" \
   --n-train "$MCTS_N_TRAIN" \
@@ -84,6 +84,7 @@ run_train "GNN on MCTS Teacher" \
   --num-layers "$NUM_LAYERS" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --init-from "$CHECKPOINT_DIR/gnn_pdf_teacher.pt" \
   --teacher-policy mcts \
   --teacher-mcts-simulations "$MCTS_SIMULATIONS" \
   --teacher-mcts-rollout-depth "$MCTS_ROLLOUT_DEPTH" \
@@ -94,9 +95,9 @@ run_train "GNN on MCTS Teacher" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
   # --no-tqdm
 
-run_train "GNN-ATTN on MCTS Teacher" \
+run_train "GNN-ATTN finetuned with MCTS" \
   --model attn \
-  --output "$CHECKPOINT_DIR/attn_mcts_teacher.pt" \
+  --output "$CHECKPOINT_DIR/attn_mcts_finetune.pt" \
   --device "$DEVICE" \
   --epochs "$MCTS_EPOCHS" \
   --n-train "$MCTS_N_TRAIN" \
@@ -107,6 +108,7 @@ run_train "GNN-ATTN on MCTS Teacher" \
   --num-heads "$NUM_HEADS" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --init-from "$CHECKPOINT_DIR/attn_pdf_teacher.pt" \
   --teacher-policy mcts \
   --teacher-mcts-simulations "$MCTS_SIMULATIONS" \
   --teacher-mcts-rollout-depth "$MCTS_ROLLOUT_DEPTH" \
@@ -117,9 +119,9 @@ run_train "GNN-ATTN on MCTS Teacher" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
   # --no-tqdm
 
-run_train "GNN on MCTS Teacher with UCT" \
+run_train "GNN finetuned with MCTS (UCT)" \
   --model gnn \
-  --output "$CHECKPOINT_DIR/gnn_mcts_teacher_uct.pt" \
+  --output "$CHECKPOINT_DIR/gnn_mcts_finetune_uct.pt" \
   --device "$DEVICE" \
   --epochs "$MCTS_EPOCHS" \
   --n-train "$MCTS_N_TRAIN" \
@@ -129,6 +131,7 @@ run_train "GNN on MCTS Teacher with UCT" \
   --num-layers "$NUM_LAYERS" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --init-from "$CHECKPOINT_DIR/gnn_pdf_teacher.pt" \
   --teacher-policy mcts \
   --teacher-mcts-simulations "$MCTS_SIMULATIONS" \
   --teacher-mcts-rollout-depth "$MCTS_ROLLOUT_DEPTH" \
@@ -139,9 +142,9 @@ run_train "GNN on MCTS Teacher with UCT" \
   --teacher-mcts-leaf-samples "$MCTS_LEAF_SAMPLES" \
   # --no-tqdm
 
-run_train "GNN-ATTN on MCTS Teacher with UCT" \
+run_train "GNN-ATTN finetuned with MCTS (UCT)" \
   --model attn \
-  --output "$CHECKPOINT_DIR/attn_mcts_teacher_uct.pt" \
+  --output "$CHECKPOINT_DIR/attn_mcts_finetune_uct.pt" \
   --device "$DEVICE" \
   --epochs "$MCTS_EPOCHS" \
   --n-train "$MCTS_N_TRAIN" \
@@ -152,6 +155,7 @@ run_train "GNN-ATTN on MCTS Teacher with UCT" \
   --num-heads "$NUM_HEADS" \
   --lr "$LR" \
   --dataset-cache-dir "$DATASET_CACHE_DIR" \
+  --init-from "$CHECKPOINT_DIR/attn_pdf_teacher.pt" \
   --teacher-policy mcts \
   --teacher-mcts-simulations "$MCTS_SIMULATIONS" \
   --teacher-mcts-rollout-depth "$MCTS_ROLLOUT_DEPTH" \
